@@ -10,9 +10,12 @@ use windows_capture::capture::Context;
 use windows_capture::{
     capture::{CaptureControl, GraphicsCaptureApiHandler},
     frame::Frame as WCFrame,
-    graphics_capture_api::InternalCaptureControl,
+    graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl},
     monitor::Monitor as WCMonitor,
-    settings::{ColorFormat, CursorCaptureSettings, DrawBorderSettings, Settings as WCSettings},
+    settings::{
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings as WCSettings,
+    },
     window::Window as WCWindow,
 };
 
@@ -20,6 +23,8 @@ use windows_capture::{
 struct Capturer {
     pub tx: mpsc::Sender<Frame>,
     pub crop: Option<Area>,
+    first_frame_timestamp: Option<i64>,
+    start_unix_nanos: u64,
 }
 
 #[derive(Clone)]
@@ -41,6 +46,11 @@ impl GraphicsCaptureApiHandler for Capturer {
         Ok(Self {
             tx: context.flags.tx,
             crop: context.flags.crop,
+            first_frame_timestamp: None,
+            start_unix_nanos: u64::try_from(
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+            )
+            .unwrap_or(u64::MAX),
         })
     }
 
@@ -49,6 +59,13 @@ impl GraphicsCaptureApiHandler for Capturer {
         frame: &mut WCFrame,
         _: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        let frame_timestamp = frame.timestamp().Duration;
+        let first_frame_timestamp = *self.first_frame_timestamp.get_or_insert(frame_timestamp);
+        let display_time = timestamp_from_timespan(
+            self.start_unix_nanos,
+            first_frame_timestamp,
+            frame_timestamp,
+        );
         match &self.crop {
             Some(cropped_area) => {
                 // get the cropped area
@@ -66,13 +83,8 @@ impl GraphicsCaptureApiHandler for Capturer {
                     Err(_) => return Err(("Failed to get raw buffer").into()),
                 };
 
-                let current_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-
                 let bgr_frame = BGRAFrame {
-                    display_time: current_time,
+                    display_time,
                     width: cropped_area.size.width as i32,
                     height: cropped_area.size.height as i32,
                     data: raw_frame_buffer.to_vec(),
@@ -87,12 +99,8 @@ impl GraphicsCaptureApiHandler for Capturer {
                 let mut frame_buffer = frame.buffer()?;
                 let raw_frame_buffer = frame_buffer.as_raw_buffer();
                 let frame_data = raw_frame_buffer.to_vec();
-                let current_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
                 let bgr_frame = BGRAFrame {
-                    display_time: current_time,
+                    display_time,
                     width: frame.width() as i32,
                     height: frame.height() as i32,
                     data: frame_data,
@@ -110,6 +118,11 @@ impl GraphicsCaptureApiHandler for Capturer {
         println!("Closed");
         Ok(())
     }
+}
+
+fn timestamp_from_timespan(start_ns: u64, first: i64, current: i64) -> u64 {
+    let elapsed_100ns = current.saturating_sub(first).max(0) as u64;
+    start_ns.saturating_add(elapsed_100ns.saturating_mul(100))
 }
 
 impl WCStream {
@@ -154,11 +167,24 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> Result<WCS
         false => CursorCaptureSettings::WithoutCursor,
     };
 
+    let draw_border = if GraphicsCaptureApi::is_border_settings_supported().unwrap_or(false) {
+        if options.show_highlight {
+            DrawBorderSettings::WithBorder
+        } else {
+            DrawBorderSettings::WithoutBorder
+        }
+    } else {
+        DrawBorderSettings::Default
+    };
+
     let settings = match target {
         Target::Display(display) => Settings::Display(WCSettings::new(
             WCMonitor::from_raw_hmonitor(display.raw_handle.0),
             show_cursor,
-            DrawBorderSettings::Default,
+            draw_border,
+            SecondaryWindowSettings::Default,
+            MinimumUpdateIntervalSettings::Default,
+            DirtyRegionSettings::Default,
             color_format,
             FlagStruct {
                 tx,
@@ -168,7 +194,10 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> Result<WCS
         Target::Window(window) => Settings::Window(WCSettings::new(
             WCWindow::from_raw_hwnd(window.raw_handle.0),
             show_cursor,
-            DrawBorderSettings::Default,
+            draw_border,
+            SecondaryWindowSettings::Default,
+            MinimumUpdateIntervalSettings::Default,
+            DirtyRegionSettings::Default,
             color_format,
             FlagStruct {
                 tx,
@@ -203,8 +232,8 @@ pub fn get_output_frame_size(options: &Options) -> Result<[u32; 2], TargetError>
     Ok([output_width, output_height])
 }
 
-fn get_absolute_value(value: f64, scale_factor: f64) -> f64 {
-    let value = (value * scale_factor).floor();
+fn get_absolute_value(value: f64) -> f64 {
+    let value = value.floor();
     value + value % 2.0
 }
 
@@ -216,7 +245,6 @@ pub fn get_crop_area(options: &Options) -> Result<Area, TargetError> {
 
     let (width, height) = targets::get_target_dimensions(&target)?;
 
-    let scale_factor = targets::get_scale_factor(&target)?;
     Ok(options
         .crop_area
         .as_ref()
@@ -224,12 +252,12 @@ pub fn get_crop_area(options: &Options) -> Result<Area, TargetError> {
             // WINDOWS: limit values [input-width, input-height] = [146, 50]
             Area {
                 origin: Point {
-                    x: get_absolute_value(val.origin.x, scale_factor),
-                    y: get_absolute_value(val.origin.y, scale_factor),
+                    x: get_absolute_value(val.origin.x),
+                    y: get_absolute_value(val.origin.y),
                 },
                 size: Size {
-                    width: get_absolute_value(val.size.width, scale_factor),
-                    height: get_absolute_value(val.size.height, scale_factor),
+                    width: get_absolute_value(val.size.width),
+                    height: get_absolute_value(val.size.height),
                 },
             }
         })
@@ -240,4 +268,15 @@ pub fn get_crop_area(options: &Options) -> Result<Area, TargetError> {
                 height: height as f64,
             },
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::timestamp_from_timespan;
+
+    #[test]
+    fn frame_timestamp_is_monotonic() {
+        assert_eq!(timestamp_from_timespan(1_000, 10, 60), 6_000);
+        assert_eq!(timestamp_from_timespan(1_000, 10, 5), 1_000);
+    }
 }
