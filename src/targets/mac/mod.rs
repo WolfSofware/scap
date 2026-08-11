@@ -6,7 +6,7 @@ use core_graphics_helmer_fork::window::CGWindowID;
 use objc::{msg_send, sel, sel_impl};
 use screencapturekit::sc_shareable_content::SCShareableContent;
 
-use super::{Display, Target};
+use super::{Display, Target, TargetError};
 
 fn get_display_name(display_id: CGDirectDisplayID) -> String {
     unsafe {
@@ -23,9 +23,11 @@ fn get_display_name(display_id: CGDirectDisplayID) -> String {
             if display_id_number == display_id {
                 let localized_name: id = msg_send![screen, localizedName];
                 let name: *const i8 = msg_send![localized_name, UTF8String];
-                return std::ffi::CStr::from_ptr(name)
-                    .to_string_lossy()
-                    .into_owned();
+                if !name.is_null() {
+                    return std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned();
+                }
             }
         }
 
@@ -33,7 +35,7 @@ fn get_display_name(display_id: CGDirectDisplayID) -> String {
     }
 }
 
-pub fn get_all_targets() -> Vec<Target> {
+pub fn get_all_targets() -> Result<Vec<Target>, TargetError> {
     let mut targets: Vec<Target> = Vec::new();
 
     let content = SCShareableContent::current();
@@ -55,9 +57,8 @@ pub fn get_all_targets() -> Vec<Target> {
 
     // Add windows to targets
     for window in content.windows {
-        if window.title.is_some() {
+        if let Some(title) = window.title {
             let id = window.window_id;
-            let title = window.title.expect("Window title not found");
             let raw_handle: CGWindowID = id;
 
             let target = Target::Window(super::Window {
@@ -69,48 +70,59 @@ pub fn get_all_targets() -> Vec<Target> {
         }
     }
 
-    targets
+    Ok(targets)
 }
 
-pub fn get_main_display() -> Display {
+pub fn get_main_display() -> Result<Display, TargetError> {
     let id = unsafe { CGMainDisplayID() };
     let title = get_display_name(id);
 
-    Display {
+    Ok(Display {
         id,
         title,
         raw_handle: CGDisplay::new(id),
-    }
+    })
 }
 
-pub fn get_scale_factor(target: &Target) -> f64 {
-    match target {
+pub fn get_scale_factor(target: &Target) -> Result<f64, TargetError> {
+    Ok(match target {
         Target::Window(window) => unsafe {
             let cg_win_id = window.raw_handle;
             let ns_app: id = NSApp();
             let ns_window: id = msg_send![ns_app, windowWithWindowNumber: cg_win_id as NSUInteger];
-            let scale_factor: f64 = msg_send![ns_window, backingScaleFactor];
-            scale_factor
+            if ns_window == nil {
+                return Err(TargetError::new("Window is no longer available"));
+            }
+            msg_send![ns_window, backingScaleFactor]
         },
         Target::Display(display) => {
-            let mode = display.raw_handle.display_mode().unwrap();
+            let mode = display
+                .raw_handle
+                .display_mode()
+                .ok_or_else(|| TargetError::new("Display mode is unavailable"))?;
             (mode.pixel_width() / mode.width()) as f64
         }
-    }
+    })
 }
 
-pub fn get_target_dimensions(target: &Target) -> (u64, u64) {
-    match target {
+pub fn get_target_dimensions(target: &Target) -> Result<(u64, u64), TargetError> {
+    Ok(match target {
         Target::Window(window) => unsafe {
             let cg_win_id = window.raw_handle;
             let ns_app: id = NSApp();
             let ns_window: id = msg_send![ns_app, windowWithWindowNumber: cg_win_id as NSUInteger];
+            if ns_window == nil {
+                return Err(TargetError::new("Window is no longer available"));
+            }
             let frame: NSRect = msg_send![ns_window, frame];
             (frame.size.width as u64, frame.size.height as u64)
         },
         Target::Display(display) => {
-            let mode = display.raw_handle.display_mode().unwrap();
+            let mode = display
+                .raw_handle
+                .display_mode()
+                .ok_or_else(|| TargetError::new("Display mode is unavailable"))?;
             (mode.width(), mode.height())
         }
-    }
+    })
 }

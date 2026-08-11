@@ -1,7 +1,8 @@
 use std::sync::mpsc;
 
-use super::Options;
+use super::{CapturerBuildError, CapturerError, Options};
 use crate::frame::Frame;
+use crate::targets::TargetError;
 
 #[cfg(target_os = "macos")]
 pub mod mac;
@@ -20,7 +21,7 @@ pub type ChannelItem = (
 #[cfg(not(target_os = "macos"))]
 pub type ChannelItem = Frame;
 
-pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
+pub fn get_output_frame_size(options: &Options) -> Result<[u32; 2], TargetError> {
     #[cfg(target_os = "macos")]
     {
         mac::get_output_frame_size(options)
@@ -34,7 +35,7 @@ pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
     #[cfg(target_os = "linux")]
     {
         // TODO: How to calculate this on Linux?
-        return [0, 0];
+        return Ok([0, 0]);
     }
 }
 
@@ -54,74 +55,82 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(options: &Options, tx: mpsc::Sender<ChannelItem>) -> Engine {
+    pub fn new(
+        options: &Options,
+        tx: mpsc::Sender<ChannelItem>,
+    ) -> Result<Engine, CapturerBuildError> {
         #[cfg(target_os = "macos")]
         {
             let error_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let mac = mac::create_capturer(options, tx, error_flag.clone());
+            let mac = mac::create_capturer(options, tx, error_flag.clone())
+                .map_err(CapturerBuildError::Initialization)?;
 
-            Engine {
+            Ok(Engine {
                 mac,
                 error_flag,
                 options: (*options).clone(),
-            }
+            })
         }
 
         #[cfg(target_os = "windows")]
         {
-            let win = win::create_capturer(&options, tx);
-            return Engine {
+            let win =
+                win::create_capturer(options, tx).map_err(CapturerBuildError::Initialization)?;
+            return Ok(Engine {
                 win,
                 options: (*options).clone(),
-            };
+            });
         }
 
         #[cfg(target_os = "linux")]
         {
-            let linux = linux::create_capturer(&options, tx);
-            return Engine {
+            let linux = linux::create_capturer(options, tx)
+                .map_err(|error| CapturerBuildError::Initialization(error.to_string()))?;
+            return Ok(Engine {
                 linux,
                 options: (*options).clone(),
-            };
+            });
         }
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&mut self) -> Result<(), CapturerError> {
         #[cfg(target_os = "macos")]
         {
             // self.mac.add_output(Capturer::new(tx));
-            self.mac.start_capture().expect("Failed to start capture");
+            self.mac.start_capture().map_err(CapturerError::new)?;
         }
 
         #[cfg(target_os = "windows")]
         {
-            self.win.start_capture();
+            self.win.start_capture().map_err(CapturerError::new)?;
         }
 
         #[cfg(target_os = "linux")]
         {
-            self.linux.start_capture();
+            self.linux.start_capture().map_err(CapturerError::new)?;
         }
+        Ok(())
     }
 
-    pub fn stop(&mut self) {
+    pub fn stop(&mut self) -> Result<(), CapturerError> {
         #[cfg(target_os = "macos")]
         {
-            self.mac.stop_capture().expect("Failed to stop capture");
+            self.mac.stop_capture().map_err(CapturerError::new)?;
         }
 
         #[cfg(target_os = "windows")]
         {
-            self.win.stop_capture();
+            self.win.stop_capture().map_err(CapturerError::new)?;
         }
 
         #[cfg(target_os = "linux")]
         {
-            self.linux.stop_capture();
+            self.linux.stop_capture().map_err(CapturerError::new)?;
         }
+        Ok(())
     }
 
-    pub fn get_output_frame_size(&mut self) -> [u32; 2] {
+    pub fn get_output_frame_size(&mut self) -> Result<[u32; 2], TargetError> {
         get_output_frame_size(&self.options)
     }
 

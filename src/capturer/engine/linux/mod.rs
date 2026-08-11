@@ -69,11 +69,10 @@ fn param_changed_callback(
         return;
     }
 
-    user_data
-        .format
-        .parse(param)
-        // TODO: Tell library user of the error
-        .expect("Failed to parse format parameter");
+    if let Err(error) = user_data.format.parse(param) {
+        eprintln!("Failed to parse PipeWire format: {error}");
+        STREAM_STATE_CHANGED_TO_ERROR.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 fn state_changed_callback(
@@ -158,7 +157,10 @@ fn process_callback(stream: &StreamRef, user_data: &mut ListenerUserData) {
                     height: frame_size.height as i32,
                     data: frame_data,
                 })),
-                _ => panic!("Unsupported frame format received"),
+                format => {
+                    eprintln!("Unsupported PipeWire frame format: {format:?}");
+                    break 'outside;
+                }
             } {
                 eprintln!("{e}");
             }
@@ -284,10 +286,11 @@ fn pipewire_capturer(
     .0
     .into_inner();
 
-    let mut params = [
-        pw::spa::pod::Pod::from_bytes(&values).unwrap(),
-        pw::spa::pod::Pod::from_bytes(&metas_values).unwrap(),
-    ];
+    let format = pw::spa::pod::Pod::from_bytes(&values)
+        .ok_or_else(|| LinCapError::new("Failed to build PipeWire format pod".into()))?;
+    let metadata = pw::spa::pod::Pod::from_bytes(&metas_values)
+        .ok_or_else(|| LinCapError::new("Failed to build PipeWire metadata pod".into()))?;
+    let mut params = [format, metadata];
 
     stream.connect(
         Direction::Input,
@@ -323,15 +326,11 @@ pub struct LinuxCapturer {
 }
 
 impl LinuxCapturer {
-    // TODO: Error handling
-    pub fn new(options: &Options, tx: mpsc::Sender<Frame>) -> Self {
-        let connection =
-            dbus::blocking::Connection::new_session().expect("Failed to create dbus connection");
+    pub fn new(options: &Options, tx: mpsc::Sender<Frame>) -> Result<Self, LinCapError> {
+        let connection = dbus::blocking::Connection::new_session()?;
         let stream_id = ScreenCastPortal::new(&connection)
-            .show_cursor(options.show_cursor)
-            .expect("Unsupported cursor mode")
-            .create_stream()
-            .expect("Failed to get screencast stream")
+            .show_cursor(options.show_cursor)?
+            .create_stream()?
             .pw_node_id();
 
         // TODO: Fix this hack
@@ -345,32 +344,42 @@ impl LinuxCapturer {
             res
         });
 
-        if !ready_recv.recv().expect("Failed to receive") {
-            panic!("Failed to setup capturer");
+        if !ready_recv.recv()? {
+            return Err(LinCapError::new(
+                "Failed to set up PipeWire capturer".into(),
+            ));
         }
 
-        Self {
+        Ok(Self {
             capturer_join_handle: Some(capturer_join_handle),
             _connection: connection,
-        }
+        })
     }
 
-    pub fn start_capture(&self) {
+    pub fn start_capture(&self) -> Result<(), LinCapError> {
         CAPTURER_STATE.store(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
-    pub fn stop_capture(&mut self) {
+    pub fn stop_capture(&mut self) -> Result<(), LinCapError> {
         CAPTURER_STATE.store(2, std::sync::atomic::Ordering::Relaxed);
-        if let Some(handle) = self.capturer_join_handle.take() {
-            if let Err(e) = handle.join().expect("Failed to join capturer thread") {
-                eprintln!("Error occured capturing: {e}");
+        let result = if let Some(handle) = self.capturer_join_handle.take() {
+            match handle.join() {
+                Ok(result) => result,
+                Err(_) => Err(LinCapError::new("PipeWire capturer thread panicked".into())),
             }
-        }
+        } else {
+            Ok(())
+        };
         CAPTURER_STATE.store(0, std::sync::atomic::Ordering::Relaxed);
         STREAM_STATE_CHANGED_TO_ERROR.store(false, std::sync::atomic::Ordering::Relaxed);
+        result
     }
 }
 
-pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> LinuxCapturer {
+pub fn create_capturer(
+    options: &Options,
+    tx: mpsc::Sender<Frame>,
+) -> Result<LinuxCapturer, LinCapError> {
     LinuxCapturer::new(options, tx)
 }

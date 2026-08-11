@@ -26,18 +26,17 @@ pub enum Resolution {
 }
 
 impl Resolution {
-    fn value(&self, aspect_ratio: f32) -> [u32; 2] {
-        match *self {
-            Resolution::_480p => [640, (640_f32 / aspect_ratio).floor() as u32],
-            Resolution::_720p => [1280, (1280_f32 / aspect_ratio).floor() as u32],
-            Resolution::_1080p => [1920, (1920_f32 / aspect_ratio).floor() as u32],
-            Resolution::_1440p => [2560, (2560_f32 / aspect_ratio).floor() as u32],
-            Resolution::_2160p => [3840, (3840_f32 / aspect_ratio).floor() as u32],
-            Resolution::_4320p => [7680, (7680_f32 / aspect_ratio).floor() as u32],
-            Resolution::Captured => {
-                panic!(".value should not be called when Resolution type is Captured")
-            }
-        }
+    fn value(&self, aspect_ratio: f32) -> Option<[u32; 2]> {
+        let width = match *self {
+            Resolution::_480p => 640,
+            Resolution::_720p => 1280,
+            Resolution::_1080p => 1920,
+            Resolution::_1440p => 2560,
+            Resolution::_2160p => 3840,
+            Resolution::_4320p => 7680,
+            Resolution::Captured => return None,
+        };
+        Some([width, (width as f32 / aspect_ratio).floor() as u32])
     }
 }
 
@@ -76,12 +75,14 @@ pub struct Options {
 pub struct Capturer {
     engine: engine::Engine,
     rx: mpsc::Receiver<ChannelItem>,
+    started: bool,
 }
 
 #[derive(Debug)]
 pub enum CapturerBuildError {
     NotSupported,
     PermissionNotGranted,
+    Initialization(String),
 }
 
 impl std::fmt::Display for CapturerBuildError {
@@ -91,6 +92,7 @@ impl std::fmt::Display for CapturerBuildError {
             CapturerBuildError::PermissionNotGranted => {
                 write!(f, "Permission to capture the screen is not granted")
             }
+            CapturerBuildError::Initialization(error) => f.write_str(error),
         }
     }
 }
@@ -103,11 +105,8 @@ impl Capturer {
         since = "0.0.6",
         note = "Use `build` instead of `new` to create a new capturer instance."
     )]
-    pub fn new(options: Options) -> Capturer {
-        let (tx, rx) = mpsc::channel();
-        let engine = engine::Engine::new(&options, tx);
-
-        Capturer { engine, rx }
+    pub fn new(options: Options) -> Result<Capturer, CapturerBuildError> {
+        Self::build(options)
     }
 
     /// Build a new [Capturer] instance with the provided options
@@ -121,21 +120,33 @@ impl Capturer {
         }
 
         let (tx, rx) = mpsc::channel();
-        let engine = engine::Engine::new(&options, tx);
+        let engine = engine::Engine::new(&options, tx)?;
 
-        Ok(Capturer { engine, rx })
+        Ok(Capturer {
+            engine,
+            rx,
+            started: false,
+        })
     }
 
     // TODO
     // Prevent starting capture if already started
     /// Start capturing the frames
-    pub fn start_capture(&mut self) {
-        self.engine.start();
+    pub fn start_capture(&mut self) -> Result<(), CapturerError> {
+        if !self.started {
+            self.engine.start()?;
+            self.started = true;
+        }
+        Ok(())
     }
 
     /// Stop the capturer
-    pub fn stop_capture(&mut self) {
-        self.engine.stop();
+    pub fn stop_capture(&mut self) -> Result<(), CapturerError> {
+        if self.started {
+            self.engine.stop()?;
+            self.started = false;
+        }
+        Ok(())
     }
 
     /// Get the next captured frame
@@ -150,7 +161,7 @@ impl Capturer {
     }
 
     /// Get the dimensions the frames will be captured in
-    pub fn get_output_frame_size(&mut self) -> [u32; 2] {
+    pub fn get_output_frame_size(&mut self) -> Result<[u32; 2], crate::TargetError> {
         self.engine.get_output_frame_size()
     }
 
@@ -159,6 +170,41 @@ impl Capturer {
     }
 }
 
+impl Drop for Capturer {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop_capture() {
+            eprintln!("Failed to stop screen capture: {error}");
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CapturerError(String);
+
+impl CapturerError {
+    pub(crate) fn new(error: impl std::fmt::Display) -> Self {
+        Self(error.to_string())
+    }
+}
+
+impl std::fmt::Display for CapturerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for CapturerError {}
+
 pub struct RawCapturer<'a> {
     capturer: &'a Capturer,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Resolution;
+
+    #[test]
+    fn captured_resolution_has_no_explicit_size() {
+        assert_eq!(Resolution::Captured.value(16.0 / 9.0), None);
+    }
 }

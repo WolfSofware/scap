@@ -37,14 +37,13 @@ If you want to contribute code, here's a quick primer:
 ```rust
 use scap::{
     capturer::{Point, Area, Size, Capturer, Options},
-    frame::Frame,
 };
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check if the platform is supported
     if !scap::is_supported() {
         println!("❌ Platform not supported");
-        return;
+        return Ok(());
     }
 
     // Check if we have permission to capture screen
@@ -53,12 +52,12 @@ fn main() {
         println!("❌ Permission not granted. Requesting permission...");
         if !scap::request_permission() {
             println!("❌ Permission denied");
-            return;
+            return Ok(());
         }
     }
 
     // Get recording targets
-    let targets = scap::get_all_targets();
+    let targets = scap::get_all_targets()?;
     println!("Targets: {:?}", targets);
 
     // All your displays and windows are targets
@@ -73,7 +72,7 @@ fn main() {
         excluded_targets: None,
         output_type: scap::frame::FrameType::BGRAFrame,
         output_resolution: scap::capturer::Resolution::_720p,
-        source_rect: Some(Area {
+        crop_area: Some(Area {
             origin: Point { x: 0.0, y: 0.0 },
             size: Size {
                 width: 2000.0,
@@ -84,16 +83,17 @@ fn main() {
     };
 
     // Create Capturer
-    let mut capturer = Capturer::new(options);
+    let mut capturer = Capturer::build(options)?;
 
     // Start Capture
-    capturer.start_capture();
+    capturer.start_capture()?;
 
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap();
+    std::io::stdin().read_line(&mut input)?;
 
     // Stop Capture
-    capturer.stop_capture();
+    capturer.stop_capture()?;
+    Ok(())
 }
 ```
 

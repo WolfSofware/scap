@@ -212,7 +212,11 @@ macro_rules! match_response {
                     "The user interaction was ended in some other way",
                 )));
             }
-            _ => unreachable!(),
+            code => {
+                return Err(LinCapError::new(format!(
+                    "Unexpected desktop portal response code: {code}"
+                )));
+            }
         }
     };
 }
@@ -289,7 +293,10 @@ impl<'a> ScreenCastPortal<'a> {
         connection.add_match(
             rule,
             move |res: OrgFreedesktopPortalRequestResponse, _chuh, _msg| {
-                let mut response = response.lock().expect("Failed to lock response mutex");
+                let mut response = match response.lock() {
+                    Ok(response) => response,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
                 *response = Some(res);
                 got_response_clone.store(true, std::sync::atomic::Ordering::Relaxed);
                 false

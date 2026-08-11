@@ -3,8 +3,7 @@
 
 use scap::{
     capturer::{Area, Capturer, Options, Point, Size},
-    frame::Frame
-    ,
+    frame::Frame,
 };
 use std::process;
 
@@ -53,12 +52,21 @@ fn main() {
     });
 
     // Start Capture
-    recorder.start_capture();
+    if let Err(error) = recorder.start_capture() {
+        eprintln!("Failed to start capture: {error}");
+        return;
+    }
 
     // Capture 100 frames
     let mut start_time: u64 = 0;
     for i in 0..100 {
-        let frame = recorder.get_next_frame().expect("Error");
+        let frame = match recorder.get_next_frame() {
+            Ok(frame) => frame,
+            Err(error) => {
+                eprintln!("Capture ended: {error}");
+                break;
+            }
+        };
 
         match frame {
             Frame::YUVFrame(frame) => {
@@ -119,5 +127,7 @@ fn main() {
     }
 
     // Stop Capture
-    recorder.stop_capture();
+    if let Err(error) = recorder.stop_capture() {
+        eprintln!("Failed to stop capture: {error}");
+    }
 }

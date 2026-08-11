@@ -120,21 +120,28 @@ pub fn convert_bgra_to_rgb(frame_data: Vec<u8>) -> Vec<u8> {
 }
 
 pub fn get_cropped_data(data: Vec<u8>, cur_width: i32, height: i32, width: i32) -> Vec<u8> {
-    if data.len() as i32 != height * cur_width * 4 {
-        data
-    } else {
-        let mut cropped_data: Vec<u8> = vec![0; (4 * height * width).try_into().unwrap()];
-        let mut cropped_data_index = 0;
-
-        for (i, item) in data.iter().enumerate() {
-            let x = i as i32 % (cur_width * 4);
-            if x < (width * 4) {
-                cropped_data[cropped_data_index] = *item;
-                cropped_data_index += 1;
-            }
-        }
-        cropped_data
+    if cur_width <= 0 || height <= 0 || width < 0 || width > cur_width {
+        return data;
     }
+
+    let source_len = (cur_width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4));
+    let target_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4));
+    let (Some(source_len), Some(target_len)) = (source_len, target_len) else {
+        return data;
+    };
+    if data.len() != source_len {
+        return data;
+    }
+
+    let mut cropped_data = Vec::with_capacity(target_len);
+    for row in data.chunks_exact(cur_width as usize * 4) {
+        cropped_data.extend_from_slice(&row[..width as usize * 4]);
+    }
+    cropped_data
 }
 
 #[cfg(test)]
@@ -179,5 +186,11 @@ mod tests {
         expected.append(rgba!(7));
         expected.append(rgba!(8));
         assert_eq!(get_cropped_data(data, 3, 3, 2), expected)
+    }
+
+    #[test]
+    fn invalid_crop_returns_original_data() {
+        let data = vec![1, 2, 3, 4];
+        assert_eq!(get_cropped_data(data.clone(), 1, 1, -1), data);
     }
 }

@@ -17,9 +17,9 @@ use screencapturekit_sys::os_types::base::{CMTime, CMTimeScale};
 use screencapturekit_sys::os_types::geometry::{CGPoint, CGRect, CGSize};
 
 use crate::frame::{Frame, FrameType};
-use crate::targets::Target;
+use crate::targets::{Target, TargetError};
 use crate::{
-    capturer::{Area, Options, Point, Resolution, Size},
+    capturer::{Area, Options, Point, Size},
     frame::BGRAFrame,
     targets,
 };
@@ -56,7 +56,7 @@ impl Capturer {
 
 impl StreamOutput for Capturer {
     fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
-        self.tx.send((sample, of_type)).unwrap_or(());
+        let _ = self.tx.send((sample, of_type));
     }
 }
 
@@ -64,12 +64,13 @@ pub fn create_capturer(
     options: &Options,
     tx: mpsc::Sender<ChannelItem>,
     error_flag: Arc<AtomicBool>,
-) -> SCStream {
+) -> Result<SCStream, String> {
     // If no target is specified, capture the main display
     let target = options
         .target
         .clone()
-        .unwrap_or_else(|| Target::Display(targets::get_main_display()));
+        .map_or_else(|| targets::get_main_display().map(Target::Display), Ok)
+        .map_err(|error| error.to_string())?;
 
     let sc_shareable_content = SCShareableContent::current();
 
@@ -80,7 +81,7 @@ pub fn create_capturer(
                 .windows
                 .into_iter()
                 .find(|sc_win| sc_win.window_id == window.id)
-                .unwrap();
+                .ok_or_else(|| format!("Window {} is no longer available", window.id))?;
 
             // Return a DesktopIndependentWindow
             // https://developer.apple.com/documentation/screencapturekit/sccontentfilter/3919804-init
@@ -92,7 +93,7 @@ pub fn create_capturer(
                 .displays
                 .into_iter()
                 .find(|sc_dis| sc_dis.display_id == display.id)
-                .unwrap();
+                .ok_or_else(|| format!("Display {} is no longer available", display.id))?;
 
             match &options.excluded_targets {
                 None => InitParams::Display(sc_display),
@@ -120,7 +121,7 @@ pub fn create_capturer(
 
     let filter = SCContentFilter::new(params);
 
-    let crop_area = get_crop_area(options);
+    let crop_area = get_crop_area(options).map_err(|error| error.to_string())?;
 
     let source_rect = CGRect {
         origin: CGPoint {
@@ -140,7 +141,7 @@ pub fn create_capturer(
         FrameType::BGRAFrame => PixelFormat::ARGB8888,
     };
 
-    let [width, height] = get_output_frame_size(options);
+    let [width, height] = get_output_frame_size(options).map_err(|error| error.to_string())?;
 
     let stream_config = SCStreamConfiguration {
         width,
@@ -160,50 +161,47 @@ pub fn create_capturer(
     let mut stream = SCStream::new(filter, stream_config, ErrorHandler { error_flag });
     stream.add_output(Capturer::new(tx), SCStreamOutputType::Screen);
 
-    stream
+    Ok(stream)
 }
 
-pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
+pub fn get_output_frame_size(options: &Options) -> Result<[u32; 2], TargetError> {
     let target = options
         .target
         .clone()
-        .unwrap_or_else(|| Target::Display(targets::get_main_display()));
+        .map_or_else(|| targets::get_main_display().map(Target::Display), Ok)?;
 
-    let scale_factor = targets::get_scale_factor(&target);
-    let source_rect = get_crop_area(options);
+    let scale_factor = targets::get_scale_factor(&target)?;
+    let source_rect = get_crop_area(options)?;
 
     // Calculate the output height & width based on the required resolution
     // Output width and height need to be multiplied by scale (or dpi)
     let mut output_width = (source_rect.size.width as u32) * (scale_factor as u32);
     let mut output_height = (source_rect.size.height as u32) * (scale_factor as u32);
     // 1200x800
-    match options.output_resolution {
-        Resolution::Captured => {}
-        _ => {
-            let [resolved_width, resolved_height] = options
-                .output_resolution
-                .value((source_rect.size.width as f32) / (source_rect.size.height as f32));
-            // 1280 x 853
-            output_width = cmp::min(output_width, resolved_width);
-            output_height = cmp::min(output_height, resolved_height);
-        }
+    if let Some([resolved_width, resolved_height]) = options
+        .output_resolution
+        .value((source_rect.size.width as f32) / (source_rect.size.height as f32))
+    {
+        // 1280 x 853
+        output_width = cmp::min(output_width, resolved_width);
+        output_height = cmp::min(output_height, resolved_height);
     }
 
     output_width -= output_width % 2;
     output_height -= output_height % 2;
 
-    [output_width, output_height]
+    Ok([output_width, output_height])
 }
 
-pub fn get_crop_area(options: &Options) -> Area {
+pub fn get_crop_area(options: &Options) -> Result<Area, TargetError> {
     let target = options
         .target
         .clone()
-        .unwrap_or_else(|| Target::Display(targets::get_main_display()));
+        .map_or_else(|| targets::get_main_display().map(Target::Display), Ok)?;
 
-    let (width, height) = targets::get_target_dimensions(&target);
+    let (width, height) = targets::get_target_dimensions(&target)?;
 
-    options
+    Ok(options
         .crop_area
         .as_ref()
         .map(|val| {
@@ -227,7 +225,7 @@ pub fn get_crop_area(options: &Options) -> Area {
                 width: width as f64,
                 height: height as f64,
             },
-        })
+        }))
 }
 
 pub fn process_sample_buffer(
@@ -240,24 +238,14 @@ pub fn process_sample_buffer(
 
         match frame_status {
             SCFrameStatus::Complete | SCFrameStatus::Started => unsafe {
-                return Some(match output_type {
+                return match output_type {
                     FrameType::YUVFrame => {
-                        let yuvframe = pixelformat::create_yuv_frame(sample).unwrap();
-                        Frame::YUVFrame(yuvframe)
+                        pixelformat::create_yuv_frame(sample).map(Frame::YUVFrame)
                     }
-                    FrameType::RGB => {
-                        let rgbframe = pixelformat::create_rgb_frame(sample).unwrap();
-                        Frame::RGB(rgbframe)
-                    }
-                    FrameType::BGR0 => {
-                        let bgrframe = pixelformat::create_bgr_frame(sample).unwrap();
-                        Frame::BGR0(bgrframe)
-                    }
-                    FrameType::BGRAFrame => {
-                        let bgraframe = pixelformat::create_bgra_frame(sample).unwrap();
-                        Frame::BGRA(bgraframe)
-                    }
-                });
+                    FrameType::RGB => pixelformat::create_rgb_frame(sample).map(Frame::RGB),
+                    FrameType::BGR0 => pixelformat::create_bgr_frame(sample).map(Frame::BGR0),
+                    FrameType::BGRAFrame => pixelformat::create_bgra_frame(sample).map(Frame::BGRA),
+                };
             },
             SCFrameStatus::Idle => {
                 // Quick hack - just send an empty frame, and the caller can figure out how to handle it

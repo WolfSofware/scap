@@ -1,11 +1,12 @@
 use crate::{
-    capturer::{Area, Options, Point, Resolution, Size},
+    capturer::{Area, Options, Point, Size},
     frame::{BGRAFrame, Frame, FrameType},
-    targets::{self, get_scale_factor, Target},
+    targets::{self, Target, TargetError},
 };
 use std::cmp;
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use windows_capture::capture::Context;
 use windows_capture::{
     capture::{CaptureControl, GraphicsCaptureApiHandler},
     frame::Frame as WCFrame,
@@ -14,7 +15,6 @@ use windows_capture::{
     settings::{ColorFormat, CursorCaptureSettings, DrawBorderSettings, Settings as WCSettings},
     window::Window as WCWindow,
 };
-use windows_capture::capture::Context;
 
 #[derive(Debug)]
 struct Capturer {
@@ -58,9 +58,7 @@ impl GraphicsCaptureApiHandler for Capturer {
                 let end_y = (cropped_area.origin.y + cropped_area.size.height) as u32;
 
                 // crop the frame
-                let mut cropped_buffer = frame
-                    .buffer_crop(start_x, start_y, end_x, end_y)
-                    .expect("Failed to crop buffer");
+                let mut cropped_buffer = frame.buffer_crop(start_x, start_y, end_x, end_y)?;
 
                 // get raw frame buffer
                 let raw_frame_buffer = match cropped_buffer.as_nopadding_buffer() {
@@ -70,7 +68,7 @@ impl GraphicsCaptureApiHandler for Capturer {
 
                 let current_time = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .expect("Failed to get current time")
+                    .unwrap_or_default()
                     .as_nanos() as u64;
 
                 let bgr_frame = BGRAFrame {
@@ -80,18 +78,18 @@ impl GraphicsCaptureApiHandler for Capturer {
                     data: raw_frame_buffer.to_vec(),
                 };
 
-                self.tx
-                    .send(Frame::BGRA(bgr_frame))
-                    .expect("Failed to send data");
+                if self.tx.send(Frame::BGRA(bgr_frame)).is_err() {
+                    return Ok(());
+                }
             }
             None => {
                 // get raw frame buffer
-                let mut frame_buffer = frame.buffer().unwrap();
+                let mut frame_buffer = frame.buffer()?;
                 let raw_frame_buffer = frame_buffer.as_raw_buffer();
                 let frame_data = raw_frame_buffer.to_vec();
                 let current_time = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .expect("Failed to get current time")
+                    .unwrap_or_default()
                     .as_nanos() as u64;
                 let bgr_frame = BGRAFrame {
                     display_time: current_time,
@@ -100,9 +98,9 @@ impl GraphicsCaptureApiHandler for Capturer {
                     data: frame_data,
                 };
 
-                self.tx
-                    .send(Frame::BGRA(bgr_frame))
-                    .expect("Failed to send data");
+                if self.tx.send(Frame::BGRA(bgr_frame)).is_err() {
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -115,18 +113,21 @@ impl GraphicsCaptureApiHandler for Capturer {
 }
 
 impl WCStream {
-    pub fn start_capture(&mut self) {
+    pub fn start_capture(&mut self) -> Result<(), String> {
         let cc = match &self.settings {
-            Settings::Display(st) => Capturer::start_free_threaded(st.to_owned()).unwrap(),
-            Settings::Window(st) => Capturer::start_free_threaded(st.to_owned()).unwrap(),
+            Settings::Display(st) => Capturer::start_free_threaded(st.to_owned()),
+            Settings::Window(st) => Capturer::start_free_threaded(st.to_owned()),
         };
 
-        self.capture_control = Some(cc)
+        self.capture_control = Some(cc.map_err(|error| error.to_string())?);
+        Ok(())
     }
 
-    pub fn stop_capture(&mut self) {
-        let capture_control = self.capture_control.take().unwrap();
-        let _ = capture_control.stop();
+    pub fn stop_capture(&mut self) -> Result<(), String> {
+        if let Some(capture_control) = self.capture_control.take() {
+            capture_control.stop().map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -136,11 +137,12 @@ struct FlagStruct {
     pub crop: Option<Area>,
 }
 
-pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> WCStream {
+pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> Result<WCStream, String> {
     let target = options
         .target
         .clone()
-        .unwrap_or_else(|| Target::Display(targets::get_main_display()));
+        .map_or_else(|| targets::get_main_display().map(Target::Display), Ok)
+        .map_err(|error| error.to_string())?;
 
     let color_format = match options.output_type {
         FrameType::BGRAFrame => ColorFormat::Bgra8,
@@ -160,7 +162,7 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> WCStream {
             color_format,
             FlagStruct {
                 tx,
-                crop: Some(get_crop_area(options)),
+                crop: Some(get_crop_area(options).map_err(|error| error.to_string())?),
             },
         )),
         Target::Window(window) => Settings::Window(WCSettings::new(
@@ -170,44 +172,35 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> WCStream {
             color_format,
             FlagStruct {
                 tx,
-                crop: Some(get_crop_area(options)),
+                crop: Some(get_crop_area(options).map_err(|error| error.to_string())?),
             },
         )),
     };
 
-    WCStream {
+    Ok(WCStream {
         settings,
         capture_control: None,
-    }
+    })
 }
 
-pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
-    let target = options
-        .target
-        .clone()
-        .unwrap_or_else(|| Target::Display(targets::get_main_display()));
-
-    let crop_area = get_crop_area(options);
+pub fn get_output_frame_size(options: &Options) -> Result<[u32; 2], TargetError> {
+    let crop_area = get_crop_area(options)?;
 
     let mut output_width = (crop_area.size.width) as u32;
     let mut output_height = (crop_area.size.height) as u32;
 
-    match options.output_resolution {
-        Resolution::Captured => {}
-        _ => {
-            let [resolved_width, resolved_height] = options
-                .output_resolution
-                .value((crop_area.size.width as f32) / (crop_area.size.height as f32));
-            // 1280 x 853
-            output_width = cmp::min(output_width, resolved_width);
-            output_height = cmp::min(output_height, resolved_height);
-        }
+    if let Some([resolved_width, resolved_height]) = options
+        .output_resolution
+        .value((crop_area.size.width as f32) / (crop_area.size.height as f32))
+    {
+        output_width = cmp::min(output_width, resolved_width);
+        output_height = cmp::min(output_height, resolved_height);
     }
 
     output_width -= output_width % 2;
     output_height -= output_height % 2;
 
-    [output_width, output_height]
+    Ok([output_width, output_height])
 }
 
 fn get_absolute_value(value: f64, scale_factor: f64) -> f64 {
@@ -215,16 +208,16 @@ fn get_absolute_value(value: f64, scale_factor: f64) -> f64 {
     value + value % 2.0
 }
 
-pub fn get_crop_area(options: &Options) -> Area {
+pub fn get_crop_area(options: &Options) -> Result<Area, TargetError> {
     let target = options
         .target
         .clone()
-        .unwrap_or_else(|| Target::Display(targets::get_main_display()));
+        .map_or_else(|| targets::get_main_display().map(Target::Display), Ok)?;
 
-    let (width, height) = targets::get_target_dimensions(&target);
+    let (width, height) = targets::get_target_dimensions(&target)?;
 
-    let scale_factor = targets::get_scale_factor(&target);
-    options
+    let scale_factor = targets::get_scale_factor(&target)?;
+    Ok(options
         .crop_area
         .as_ref()
         .map(|val| {
@@ -246,5 +239,5 @@ pub fn get_crop_area(options: &Options) -> Area {
                 width: width as f64,
                 height: height as f64,
             },
-        })
+        }))
 }

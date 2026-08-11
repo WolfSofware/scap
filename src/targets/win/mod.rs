@@ -1,4 +1,4 @@
-use super::{Display, Target};
+use super::{Display, Target, TargetError};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::{
     Foundation::{HWND, RECT},
@@ -6,14 +6,14 @@ use windows::Win32::{
 };
 use windows_capture::{monitor::Monitor, window::Window};
 
-pub fn get_all_targets() -> Vec<Target> {
+pub fn get_all_targets() -> Result<Vec<Target>, TargetError> {
     let mut targets: Vec<Target> = Vec::new();
 
     // Add displays to targets
-    let displays = Monitor::enumerate().expect("Failed to enumerate monitors");
+    let displays = Monitor::enumerate().map_err(TargetError::new)?;
     for display in displays {
         let id = display.as_raw_hmonitor() as u32;
-        let title = display.device_name().expect("Failed to get monitor name");
+        let title = display.device_name().map_err(TargetError::new)?;
 
         let target = Target::Display(super::Display {
             id,
@@ -24,10 +24,10 @@ pub fn get_all_targets() -> Vec<Target> {
     }
 
     // Add windows to targets
-    let windows = Window::enumerate().expect("Failed to enumerate windows");
+    let windows = Window::enumerate().map_err(TargetError::new)?;
     for window in windows {
         let id = window.as_raw_hwnd() as u32;
-        let title = window.title().unwrap().to_string();
+        let title = window.title().map_err(TargetError::new)?.to_string();
 
         let target = Target::Window(super::Window {
             id,
@@ -37,22 +37,22 @@ pub fn get_all_targets() -> Vec<Target> {
         targets.push(target);
     }
 
-    targets
+    Ok(targets)
 }
 
-pub fn get_main_display() -> Display {
-    let display = Monitor::primary().expect("Failed to get primary monitor");
+pub fn get_main_display() -> Result<Display, TargetError> {
+    let display = Monitor::primary().map_err(TargetError::new)?;
     let id = display.as_raw_hmonitor() as u32;
 
-    Display {
+    Ok(Display {
         id,
-        title: display.device_name().expect("Failed to get monitor name"),
+        title: display.device_name().map_err(TargetError::new)?,
         raw_handle: HMONITOR(display.as_raw_hmonitor()),
-    }
+    })
 }
 
 // Referred to: https://github.com/tauri-apps/tao/blob/ab792dbd6c5f0a708c818b20eaff1d9a7534c7c1/src/platform_impl/windows/dpi.rs#L50
-pub fn get_scale_factor(target: &Target) -> f64 {
+pub fn get_scale_factor(target: &Target) -> Result<f64, TargetError> {
     const BASE_DPI: u32 = 96;
 
     let mut dpi_x = 0;
@@ -77,17 +77,18 @@ pub fn get_scale_factor(target: &Target) -> f64 {
     };
 
     let scale_factor = dpi as f64 / BASE_DPI as f64;
-    scale_factor as f64
+    Ok(scale_factor)
 }
 
-pub fn get_target_dimensions(target: &Target) -> (u64, u64) {
-    match target {
+pub fn get_target_dimensions(target: &Target) -> Result<(u64, u64), TargetError> {
+    Ok(match target {
         Target::Window(window) => unsafe {
             let hwnd = window.raw_handle;
 
             // get width and height of the window
             let mut rect = RECT::default();
-            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
+            windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect)
+                .map_err(TargetError::new)?;
             let width = rect.right - rect.left;
             let height = rect.bottom - rect.top;
 
@@ -97,9 +98,9 @@ pub fn get_target_dimensions(target: &Target) -> (u64, u64) {
             let monitor = Monitor::from_raw_hmonitor(display.raw_handle.0);
 
             (
-                monitor.width().unwrap() as u64,
-                monitor.height().unwrap() as u64,
+                monitor.width().map_err(TargetError::new)? as u64,
+                monitor.height().map_err(TargetError::new)? as u64,
             )
         }
-    }
+    })
 }

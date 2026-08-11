@@ -37,6 +37,12 @@ impl From<std::sync::mpsc::SendError<bool>> for LinCapError {
     }
 }
 
+impl From<std::sync::mpsc::RecvError> for LinCapError {
+    fn from(e: std::sync::mpsc::RecvError) -> Self {
+        Self::new(e.to_string())
+    }
+}
+
 impl From<GenError> for LinCapError {
     fn from(e: GenError) -> Self {
         Self::new(e.to_string())
