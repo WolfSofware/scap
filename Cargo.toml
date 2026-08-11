@@ -3,7 +3,7 @@ name = "scap"
 description = "Modern, high-performance screen capture library for Rust. Cross-platform."
 version = "0.0.8"
 edition = "2021"
-rust-version = "1.71"
+rust-version = "1.76"
 license = "MIT"
 authors = [
 	"Siddharth <siddharth99c@gmail.com>",
@@ -28,10 +28,8 @@ windows = { version = "0.58", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-tao-core-video-sys = "0.2.0"
 core-graphics-helmer-fork = "0.24.0"
-screencapturekit = "0.2.8"
-screencapturekit-sys = "0.2.8"
+screencapturekit = "=8.0.1"
 cocoa = "0.25.0"
 objc = "0.2.7"
 

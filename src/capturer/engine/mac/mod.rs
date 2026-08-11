@@ -3,18 +3,8 @@ use std::sync::mpsc;
 use std::{cmp, sync::Arc};
 
 use pixelformat::get_pts_in_nanoseconds;
-use screencapturekit::{
-    cm_sample_buffer::CMSampleBuffer,
-    sc_content_filter::{InitParams, SCContentFilter},
-    sc_error_handler::StreamErrorHandler,
-    sc_output_handler::{SCStreamOutputType, StreamOutput},
-    sc_shareable_content::SCShareableContent,
-    sc_stream::SCStream,
-    sc_stream_configuration::{PixelFormat, SCStreamConfiguration},
-    sc_types::SCFrameStatus,
-};
-use screencapturekit_sys::os_types::base::{CMTime, CMTimeScale};
-use screencapturekit_sys::os_types::geometry::{CGPoint, CGRect, CGSize};
+use screencapturekit::cm::SCFrameStatus;
+use screencapturekit::prelude::*;
 
 use crate::frame::{Frame, FrameType};
 use crate::targets::{Target, TargetError};
@@ -26,23 +16,10 @@ use crate::{
 
 use super::ChannelItem;
 
-mod apple_sys;
 mod pixel_buffer;
 mod pixelformat;
 
 pub use pixel_buffer::PixelBuffer;
-
-struct ErrorHandler {
-    error_flag: Arc<AtomicBool>,
-}
-
-impl StreamErrorHandler for ErrorHandler {
-    fn on_error(&self) {
-        eprintln!("Screen capture error occurred.");
-        self.error_flag
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-}
 
 pub struct Capturer {
     pub tx: mpsc::Sender<ChannelItem>,
@@ -54,7 +31,7 @@ impl Capturer {
     }
 }
 
-impl StreamOutput for Capturer {
+impl SCStreamOutputTrait for Capturer {
     fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
         let _ = self.tx.send((sample, of_type));
     }
@@ -72,94 +49,72 @@ pub fn create_capturer(
         .map_or_else(|| targets::get_main_display().map(Target::Display), Ok)
         .map_err(|error| error.to_string())?;
 
-    let sc_shareable_content = SCShareableContent::current();
+    let content = SCShareableContent::get().map_err(|error| error.to_string())?;
 
-    let params = match target {
+    let filter = match target {
         Target::Window(window) => {
-            // Get SCWindow from window id
-            let sc_window = sc_shareable_content
-                .windows
+            let sc_window = content
+                .windows()
                 .into_iter()
-                .find(|sc_win| sc_win.window_id == window.id)
+                .find(|sc_win| sc_win.window_id() == window.id)
                 .ok_or_else(|| format!("Window {} is no longer available", window.id))?;
-
-            // Return a DesktopIndependentWindow
-            // https://developer.apple.com/documentation/screencapturekit/sccontentfilter/3919804-init
-            InitParams::DesktopIndependentWindow(sc_window)
+            SCContentFilter::create().with_window(&sc_window).build()
         }
         Target::Display(display) => {
-            // Get SCDisplay from display id
-            let sc_display = sc_shareable_content
-                .displays
+            let sc_display = content
+                .displays()
                 .into_iter()
-                .find(|sc_dis| sc_dis.display_id == display.id)
+                .find(|sc_dis| sc_dis.display_id() == display.id)
                 .ok_or_else(|| format!("Display {} is no longer available", display.id))?;
-
-            match &options.excluded_targets {
-                None => InitParams::Display(sc_display),
-                Some(excluded_targets) => {
-                    let excluded_windows = sc_shareable_content
-                        .windows
-                        .into_iter()
-                        .filter(|window| {
-                            excluded_targets
-                                .iter()
-                                .any(|excluded_target| match excluded_target {
-                                    Target::Window(excluded_window) => {
-                                        excluded_window.id == window.window_id
-                                    }
-                                    _ => false,
-                                })
-                        })
-                        .collect();
-
-                    InitParams::DisplayExcludingWindows(sc_display, excluded_windows)
-                }
-            }
+            let excluded_windows = content.windows().into_iter().filter(|window| {
+                options.excluded_targets.as_ref().is_some_and(|targets| {
+                    targets.iter().any(|target| {
+                        matches!(target, Target::Window(excluded) if excluded.id == window.window_id())
+                    })
+                })
+            }).collect::<Vec<_>>();
+            let excluded_refs = excluded_windows.iter().collect::<Vec<_>>();
+            SCContentFilter::create()
+                .with_display(&sc_display)
+                .with_excluding_windows(&excluded_refs)
+                .build()
         }
     };
-
-    let filter = SCContentFilter::new(params);
 
     let crop_area = get_crop_area(options).map_err(|error| error.to_string())?;
 
-    let source_rect = CGRect {
-        origin: CGPoint {
-            x: crop_area.origin.x,
-            y: crop_area.origin.y,
-        },
-        size: CGSize {
-            width: crop_area.size.width,
-            height: crop_area.size.height,
-        },
-    };
+    let source_rect = CGRect::new(
+        crop_area.origin.x,
+        crop_area.origin.y,
+        crop_area.size.width,
+        crop_area.size.height,
+    );
 
     let pixel_format = match options.output_type {
-        FrameType::YUVFrame => PixelFormat::YCbCr420v,
-        FrameType::BGR0 => PixelFormat::ARGB8888,
-        FrameType::RGB => PixelFormat::ARGB8888,
-        FrameType::BGRAFrame => PixelFormat::ARGB8888,
+        FrameType::YUVFrame => PixelFormat::YCbCr_420v,
+        FrameType::BGR0 | FrameType::RGB | FrameType::BGRAFrame => PixelFormat::BGRA,
     };
 
     let [width, height] = get_output_frame_size(options).map_err(|error| error.to_string())?;
 
-    let stream_config = SCStreamConfiguration {
-        width,
-        height,
-        source_rect,
-        pixel_format,
-        shows_cursor: options.show_cursor,
-        minimum_frame_interval: CMTime {
-            value: 1,
-            timescale: options.fps as CMTimeScale,
-            epoch: 0,
-            flags: 1,
-        },
-        ..Default::default()
-    };
+    let stream_config = SCStreamConfiguration::new()
+        .with_width(width)
+        .with_height(height)
+        .with_source_rect(source_rect)
+        .with_pixel_format(pixel_format)
+        .with_shows_cursor(options.show_cursor)
+        .with_minimum_frame_interval(&CMTime::new(1, options.fps as i32));
 
-    let mut stream = SCStream::new(filter, stream_config, ErrorHandler { error_flag });
-    stream.add_output(Capturer::new(tx), SCStreamOutputType::Screen);
+    let delegate_flag = error_flag.clone();
+    let mut stream = SCStream::new_with_delegate(
+        &filter,
+        &stream_config,
+        ErrorHandler::new(move |error| {
+            eprintln!("Screen capture error: {error}");
+            delegate_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }),
+    );
+    stream.add_output_handler(Capturer::new(tx), SCStreamOutputType::Screen);
 
     Ok(stream)
 }
@@ -234,10 +189,10 @@ pub fn process_sample_buffer(
     output_type: FrameType,
 ) -> Option<Frame> {
     if let SCStreamOutputType::Screen = of_type {
-        let frame_status = &sample.frame_status;
+        let frame_status = sample.frame_status()?;
 
         match frame_status {
-            SCFrameStatus::Complete | SCFrameStatus::Started => unsafe {
+            SCFrameStatus::Complete | SCFrameStatus::Started => {
                 return match output_type {
                     FrameType::YUVFrame => {
                         pixelformat::create_yuv_frame(sample).map(Frame::YUVFrame)
@@ -246,7 +201,7 @@ pub fn process_sample_buffer(
                     FrameType::BGR0 => pixelformat::create_bgr_frame(sample).map(Frame::BGR0),
                     FrameType::BGRAFrame => pixelformat::create_bgra_frame(sample).map(Frame::BGRA),
                 };
-            },
+            }
             SCFrameStatus::Idle => {
                 // Quick hack - just send an empty frame, and the caller can figure out how to handle it
                 if let FrameType::BGRAFrame = output_type {

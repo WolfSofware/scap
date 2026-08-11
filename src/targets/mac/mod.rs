@@ -4,7 +4,7 @@ use cocoa::foundation::{NSRect, NSString, NSUInteger};
 use core_graphics_helmer_fork::display::{CGDirectDisplayID, CGDisplay, CGMainDisplayID};
 use core_graphics_helmer_fork::window::CGWindowID;
 use objc::{msg_send, sel, sel_impl};
-use screencapturekit::sc_shareable_content::SCShareableContent;
+use screencapturekit::shareable_content::SCShareableContent;
 
 use super::{Display, Target, TargetError};
 
@@ -38,11 +38,11 @@ fn get_display_name(display_id: CGDirectDisplayID) -> String {
 pub fn get_all_targets() -> Result<Vec<Target>, TargetError> {
     let mut targets: Vec<Target> = Vec::new();
 
-    let content = SCShareableContent::current();
+    let content = SCShareableContent::get().map_err(|error| TargetError::new(error.to_string()))?;
 
     // Add displays to targets
-    for display in content.displays {
-        let id: CGDirectDisplayID = display.display_id;
+    for display in content.displays() {
+        let id: CGDirectDisplayID = display.display_id();
         let raw_handle = CGDisplay::new(id);
         let title = get_display_name(id);
 
@@ -56,9 +56,9 @@ pub fn get_all_targets() -> Result<Vec<Target>, TargetError> {
     }
 
     // Add windows to targets
-    for window in content.windows {
-        if let Some(title) = window.title {
-            let id = window.window_id;
+    for window in content.windows() {
+        if let Some(title) = window.title() {
+            let id = window.window_id();
             let raw_handle: CGWindowID = id;
 
             let target = Target::Window(super::Window {

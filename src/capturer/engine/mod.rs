@@ -15,8 +15,8 @@ mod linux;
 
 #[cfg(target_os = "macos")]
 pub type ChannelItem = (
-    screencapturekit::cm_sample_buffer::CMSampleBuffer,
-    screencapturekit::sc_output_handler::SCStreamOutputType,
+    screencapturekit::cm::CMSampleBuffer,
+    screencapturekit::prelude::SCStreamOutputType,
 );
 #[cfg(not(target_os = "macos"))]
 pub type ChannelItem = Frame;
@@ -43,7 +43,7 @@ pub struct Engine {
     options: Options,
 
     #[cfg(target_os = "macos")]
-    mac: screencapturekit::sc_stream::SCStream,
+    mac: screencapturekit::stream::SCStream,
     #[cfg(target_os = "macos")]
     error_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
