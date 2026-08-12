@@ -71,8 +71,27 @@ impl GraphicsCaptureApiHandler for Capturer {
                 // get the cropped area
                 let start_x = cropped_area.origin.x as u32;
                 let start_y = cropped_area.origin.y as u32;
-                let end_x = (cropped_area.origin.x + cropped_area.size.width) as u32;
-                let end_y = (cropped_area.origin.y + cropped_area.size.height) as u32;
+
+                // Область обрезки считается из EnumDisplaySettings — это режим
+                // дисплея. Кадр приходит от Windows Graphics Capture. Совпадать
+                // они НЕ обязаны: масштабирование, смена режима на лету, свежая
+                // раскладка мониторов — и размеры разъезжаются.
+                //
+                // Границы при этом не проверяет никто: buffer_crop следит только
+                // за start < end. Если область вылезет за текстуру, копирование
+                // уходит за её пределы и рушит кучу — процесс умирает с
+                // STATUS_HEAP_CORRUPTION (0xC0000374) прямо в start_capture,
+                // без единой строчки в журнале. Воспроизводилось на одних
+                // машинах и не воспроизводилось на других именно поэтому.
+                let end_x = ((cropped_area.origin.x + cropped_area.size.width) as u32)
+                    .min(frame.width());
+                let end_y = ((cropped_area.origin.y + cropped_area.size.height) as u32)
+                    .min(frame.height());
+                if start_x >= end_x || start_y >= end_y {
+                    // Пропускаем кадр, а не падаем: следующий может прийти уже
+                    // с согласованными размерами.
+                    return Ok(());
+                }
 
                 // crop the frame
                 let mut cropped_buffer = frame.buffer_crop(start_x, start_y, end_x, end_y)?;
@@ -85,8 +104,10 @@ impl GraphicsCaptureApiHandler for Capturer {
 
                 let bgr_frame = BGRAFrame {
                     display_time,
-                    width: cropped_area.size.width as i32,
-                    height: cropped_area.size.height as i32,
+                    // Размеры берём фактические, после подрезки под кадр: иначе
+                    // получатель увидит одно число, а байтов придёт под другое.
+                    width: (end_x - start_x) as i32,
+                    height: (end_y - start_y) as i32,
                     data: raw_frame_buffer.to_vec(),
                 };
 
