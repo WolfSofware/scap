@@ -203,7 +203,8 @@ pub struct DropTally {
     pub blank: u64,
     /// Поток приостановлен.
     pub suspended: u64,
-    /// Статус прочитать не удалось.
+    /// Статус прочитать не удалось. Не отказ сам по себе — такой буфер мы
+    /// всё равно разбираем; счётчик нужен, чтобы это не осталось незамеченным.
     pub no_status: u64,
     /// Статус годный, а разбор пикселей не удался.
     pub decode_failed: u64,
@@ -234,7 +235,7 @@ impl DropTally {
         add(self.blank, "пустой кадр");
         add(self.suspended, "поток приостановлен");
         add(self.decode_failed, "разбор пикселей не удался");
-        add(self.no_status, "статус не прочитался");
+        add(self.no_status, "статус не прочитался (разбирали всё равно)");
         add(self.not_screen, "не выход экрана");
         add(self.other, "прочее");
         if parts.is_empty() {
@@ -257,9 +258,24 @@ pub fn process_sample_buffer(
         }
     };
     if let SCStreamOutputType::Screen = of_type {
-        let Some(frame_status) = sample.frame_status() else {
-            note(|t| &mut t.no_status);
-            return None;
+        // Статус — ПОДСКАЗКА, а не пропуск.
+        //
+        // `frame_status()` читает служебную метку `SCStreamFrameInfoStatus` и
+        // при неудаче отдаёт `None`. Раньше на этом буфер выбрасывался, даже не
+        // будучи осмотренным, — и на macOS 26, где метка не читается, в мусор
+        // уходил КАЖДЫЙ кадр. Снаружи это выглядело как мёртвая демонстрация:
+        // поток создан, данные идут, картинки нет и ошибки нет.
+        //
+        // Метка нужна ровно затем, чтобы не тратить силы на кадры, в которых
+        // заведомо нечего показывать. Её отсутствие про содержимое не говорит
+        // ничего, поэтому берёмся разбирать: если пикселей действительно нет,
+        // разбор откажет сам и скажет об этом честно.
+        let frame_status = match sample.frame_status() {
+            Some(status) => status,
+            None => {
+                note(|t| &mut t.no_status);
+                SCFrameStatus::Complete
+            }
         };
 
         match frame_status {
