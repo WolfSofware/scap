@@ -176,24 +176,17 @@ impl Capturer {
 
     fn next_frame_until(&self, timeout: Option<Duration>) -> Result<Frame, NextFrameError> {
         let started = Instant::now();
+        // Сколько буферов пришло и НЕ стало кадром. Различает два совершенно
+        // разных отказа, которые снаружи выглядят одинаково — картинки нет:
+        // источник молчит (ноль) или источник шлёт непригодное (больше нуля).
+        let mut discarded = 0u64;
         loop {
             match self.rx.recv_timeout(Self::POLL) {
-                Ok(item) => {
-                    if let Some(frame) = self.engine.process_channel_item(item) {
-                        return Ok(frame);
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Тишина сама по себе не поломка: неподвижный экран кадров
-                    // не рождает, а неполные кадры отсеиваются выше. Поломка —
-                    // это когда поток УЖЕ сообщил об отказе.
-                    if let Some(error) = self.engine.stream_error() {
-                        return Err(NextFrameError::Stream(error));
-                    }
-                    if timeout.is_some_and(|limit| started.elapsed() >= limit) {
-                        return Err(NextFrameError::Timeout);
-                    }
-                }
+                Ok(item) => match self.engine.process_channel_item(item) {
+                    Some(frame) => return Ok(frame),
+                    None => discarded += 1,
+                },
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     // Причина важнее факта: если отказ известен, называем его.
                     return Err(match self.engine.stream_error() {
@@ -201,6 +194,18 @@ impl Capturer {
                         None => NextFrameError::Disconnected,
                     });
                 }
+            }
+            // Проверки — НА КАЖДОМ обороте, а не только когда канал промолчал.
+            //
+            // Пока они стояли в ветке тишины, поток, исправно шлющий буферы, из
+            // которых не выходит ни одного кадра, не давал этой ветке наступить
+            // ни разу: `recv_timeout` всегда возвращал `Ok`, и ожидание с
+            // потолком становилось ожиданием без потолка.
+            if let Some(error) = self.engine.stream_error() {
+                return Err(NextFrameError::Stream(error));
+            }
+            if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                return Err(NextFrameError::Timeout { discarded });
             }
         }
     }
@@ -248,7 +253,10 @@ pub enum NextFrameError {
     /// Источник закрылся.
     Disconnected,
     /// Отведённое время вышло, и об ошибке никто не сообщил.
-    Timeout,
+    Timeout {
+        /// Сколько буферов пришло, но кадром не стало.
+        discarded: u64,
+    },
 }
 
 impl std::fmt::Display for NextFrameError {
@@ -256,9 +264,14 @@ impl std::fmt::Display for NextFrameError {
         match self {
             NextFrameError::Stream(error) => write!(f, "поток захвата отказал: {error}"),
             NextFrameError::Disconnected => f.write_str("источник захвата закрылся"),
-            NextFrameError::Timeout => {
-                f.write_str("кадр не пришёл за отведённое время, об ошибке не сообщено")
+            NextFrameError::Timeout { discarded: 0 } => {
+                f.write_str("за отведённое время источник не прислал ничего и не сообщил об ошибке")
             }
+            NextFrameError::Timeout { discarded } => write!(
+                f,
+                "источник прислал {discarded} буферов за отведённое время, \
+                 но кадром не стал ни один"
+            ),
         }
     }
 }
