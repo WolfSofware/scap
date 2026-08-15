@@ -46,6 +46,8 @@ pub struct Engine {
     mac: screencapturekit::stream::SCStream,
     #[cfg(target_os = "macos")]
     error_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(target_os = "macos")]
+    error_text: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 
     #[cfg(target_os = "windows")]
     win: win::WCStream,
@@ -62,12 +64,14 @@ impl Engine {
         #[cfg(target_os = "macos")]
         {
             let error_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let mac = mac::create_capturer(options, tx, error_flag.clone())
+            let error_text = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let mac = mac::create_capturer(options, tx, error_flag.clone(), error_text.clone())
                 .map_err(CapturerBuildError::Initialization)?;
 
             Ok(Engine {
                 mac,
                 error_flag,
+                error_text,
                 options: (*options).clone(),
             })
         }
@@ -132,6 +136,32 @@ impl Engine {
 
     pub fn get_output_frame_size(&mut self) -> Result<[u32; 2], TargetError> {
         get_output_frame_size(&self.options)
+    }
+
+    /// Что сообщил поток захвата, если сообщил.
+    ///
+    /// На macOS ошибку приносит делегат SCStream — асинхронно и в обход
+    /// канала кадров. Без этого доступа отказ потока неотличим от неподвижной
+    /// картинки: и там и там кадров просто нет.
+    pub fn stream_error(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            if !self
+                .error_flag
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return None;
+            }
+            return match self.error_text.lock() {
+                Ok(slot) => Some(
+                    slot.clone()
+                        .unwrap_or_else(|| "поток захвата сообщил об ошибке".to_string()),
+                ),
+                Err(_) => Some("поток захвата сообщил об ошибке".to_string()),
+            };
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
     }
 
     pub fn process_channel_item(&self, data: ChannelItem) -> Option<Frame> {

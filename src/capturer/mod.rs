@@ -1,6 +1,10 @@
 pub mod engine;
 
-use std::{error::Error, sync::mpsc};
+use std::{
+    error::Error,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 use engine::ChannelItem;
 
@@ -149,13 +153,54 @@ impl Capturer {
         Ok(())
     }
 
-    /// Get the next captured frame
-    pub fn get_next_frame(&self) -> Result<Frame, mpsc::RecvError> {
-        loop {
-            let res = self.rx.recv()?;
+    /// Get the next captured frame, waiting as long as it takes.
+    ///
+    /// Возвращается только с кадром или с ОШИБКОЙ: молчания здесь не бывает.
+    pub fn get_next_frame(&self) -> Result<Frame, NextFrameError> {
+        self.next_frame_until(None)
+    }
 
-            if let Some(frame) = self.engine.process_channel_item(res) {
-                return Ok(frame);
+    /// То же, но с потолком ожидания.
+    ///
+    /// Нужен тому, кто обязан оставаться живым: без потолка отказ, о котором
+    /// поток не сообщил, обездвиживает вызывающую нить навсегда — ни выхода,
+    /// ни остановки захвата, ни записи в журнал.
+    pub fn get_next_frame_timeout(&self, timeout: Duration) -> Result<Frame, NextFrameError> {
+        self.next_frame_until(Some(timeout))
+    }
+
+    /// Шаг опроса. Меньше — быстрее замечаем поломку, больше — реже будим нить.
+    /// Кадр приходит по готовности, а не по этому сроку, так что на задержку
+    /// картинки значение не влияет.
+    const POLL: Duration = Duration::from_millis(50);
+
+    fn next_frame_until(&self, timeout: Option<Duration>) -> Result<Frame, NextFrameError> {
+        let started = Instant::now();
+        loop {
+            match self.rx.recv_timeout(Self::POLL) {
+                Ok(item) => {
+                    if let Some(frame) = self.engine.process_channel_item(item) {
+                        return Ok(frame);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Тишина сама по себе не поломка: неподвижный экран кадров
+                    // не рождает, а неполные кадры отсеиваются выше. Поломка —
+                    // это когда поток УЖЕ сообщил об отказе.
+                    if let Some(error) = self.engine.stream_error() {
+                        return Err(NextFrameError::Stream(error));
+                    }
+                    if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                        return Err(NextFrameError::Timeout);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // Причина важнее факта: если отказ известен, называем его.
+                    return Err(match self.engine.stream_error() {
+                        Some(error) => NextFrameError::Stream(error),
+                        None => NextFrameError::Disconnected,
+                    });
+                }
             }
         }
     }
@@ -194,6 +239,31 @@ impl std::fmt::Display for CapturerError {
 }
 
 impl Error for CapturerError {}
+
+/// Почему кадр не пришёл.
+#[derive(Debug)]
+pub enum NextFrameError {
+    /// Поток захвата сообщил об отказе (на macOS — делегат SCStream).
+    Stream(String),
+    /// Источник закрылся.
+    Disconnected,
+    /// Отведённое время вышло, и об ошибке никто не сообщил.
+    Timeout,
+}
+
+impl std::fmt::Display for NextFrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NextFrameError::Stream(error) => write!(f, "поток захвата отказал: {error}"),
+            NextFrameError::Disconnected => f.write_str("источник захвата закрылся"),
+            NextFrameError::Timeout => {
+                f.write_str("кадр не пришёл за отведённое время, об ошибке не сообщено")
+            }
+        }
+    }
+}
+
+impl Error for NextFrameError {}
 
 pub struct RawCapturer<'a> {
     capturer: &'a Capturer,

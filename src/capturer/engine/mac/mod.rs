@@ -1,5 +1,5 @@
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 use std::{cmp, sync::Arc};
 
 use pixelformat::get_pts_in_nanoseconds;
@@ -41,6 +41,7 @@ pub fn create_capturer(
     options: &Options,
     tx: mpsc::Sender<ChannelItem>,
     error_flag: Arc<AtomicBool>,
+    error_text: Arc<Mutex<Option<String>>>,
 ) -> Result<SCStream, String> {
     // If no target is specified, capture the main display
     let target = options
@@ -110,7 +111,14 @@ pub fn create_capturer(
         &filter,
         &stream_config,
         ErrorHandler::new(move |error| {
-            eprintln!("Screen capture error: {error}");
+            // Раньше здесь стоял `eprintln!`. У приложения, запущенного не из
+            // терминала, stderr не ведёт никуда, а флаг ниже читал только
+            // сырой путь (`get_next_pixel_buffer`). Поэтому отказ потока
+            // выглядел как вечная тишина: ни кадров, ни ошибки, ни следа.
+            // Текст сохраняем — за ним придёт `get_next_frame`.
+            if let Ok(mut slot) = error_text.lock() {
+                *slot = Some(error.to_string());
+            }
             delegate_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }),
     );
