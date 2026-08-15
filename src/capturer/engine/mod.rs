@@ -48,6 +48,8 @@ pub struct Engine {
     error_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(target_os = "macos")]
     error_text: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    #[cfg(target_os = "macos")]
+    drops: std::sync::Arc<std::sync::Mutex<mac::DropTally>>,
 
     #[cfg(target_os = "windows")]
     win: win::WCStream,
@@ -72,6 +74,7 @@ impl Engine {
                 mac,
                 error_flag,
                 error_text,
+                drops: std::sync::Arc::new(std::sync::Mutex::new(mac::DropTally::default())),
                 options: (*options).clone(),
             })
         }
@@ -164,10 +167,24 @@ impl Engine {
         None
     }
 
+    /// Почему пришедшие буферы не стали кадрами — словами.
+    pub fn drop_summary(&self) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            let tally = self.drops.lock().ok()?;
+            if tally.total() == 0 {
+                return None;
+            }
+            return Some(tally.describe());
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+
     pub fn process_channel_item(&self, data: ChannelItem) -> Option<Frame> {
         #[cfg(target_os = "macos")]
         {
-            mac::process_sample_buffer(data.0, data.1, self.options.output_type)
+            mac::process_sample_buffer(data.0, data.1, self.options.output_type, &self.drops)
         }
         #[cfg(not(target_os = "macos"))]
         return Some(data);

@@ -191,17 +191,80 @@ pub fn get_crop_area(options: &Options) -> Result<Area, TargetError> {
         }))
 }
 
+/// Почему буфер не стал кадром. Снаружи все отказы выглядят одинаково —
+/// картинки нет, — а чинятся по-разному, поэтому считаем их порознь.
+#[derive(Default, Clone, Copy)]
+pub struct DropTally {
+    /// Не наш выход (звук демонстрации, а не экран).
+    pub not_screen: u64,
+    /// Экран не изменился — ScreenCaptureKit прислал «простой».
+    pub idle: u64,
+    /// Пустой кадр: содержимое скрыто или защищено.
+    pub blank: u64,
+    /// Поток приостановлен.
+    pub suspended: u64,
+    /// Статус прочитать не удалось.
+    pub no_status: u64,
+    /// Статус годный, а разбор пикселей не удался.
+    pub decode_failed: u64,
+    /// Прочие статусы.
+    pub other: u64,
+}
+
+impl DropTally {
+    pub fn total(&self) -> u64 {
+        self.not_screen
+            + self.idle
+            + self.blank
+            + self.suspended
+            + self.no_status
+            + self.decode_failed
+            + self.other
+    }
+
+    /// Словами и только про то, что действительно случилось.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        let mut add = |n: u64, what: &str| {
+            if n > 0 {
+                parts.push(format!("{what}: {n}"));
+            }
+        };
+        add(self.idle, "экран не менялся");
+        add(self.blank, "пустой кадр");
+        add(self.suspended, "поток приостановлен");
+        add(self.decode_failed, "разбор пикселей не удался");
+        add(self.no_status, "статус не прочитался");
+        add(self.not_screen, "не выход экрана");
+        add(self.other, "прочее");
+        if parts.is_empty() {
+            "нечего отбрасывать".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
 pub fn process_sample_buffer(
     sample: CMSampleBuffer,
     of_type: SCStreamOutputType,
     output_type: FrameType,
+    tally: &Mutex<DropTally>,
 ) -> Option<Frame> {
+    let note = |pick: fn(&mut DropTally) -> &mut u64| {
+        if let Ok(mut t) = tally.lock() {
+            *pick(&mut t) += 1;
+        }
+    };
     if let SCStreamOutputType::Screen = of_type {
-        let frame_status = sample.frame_status()?;
+        let Some(frame_status) = sample.frame_status() else {
+            note(|t| &mut t.no_status);
+            return None;
+        };
 
         match frame_status {
             SCFrameStatus::Complete | SCFrameStatus::Started => {
-                return match output_type {
+                let frame = match output_type {
                     FrameType::YUVFrame => {
                         pixelformat::create_yuv_frame(sample).map(Frame::YUVFrame)
                     }
@@ -209,8 +272,15 @@ pub fn process_sample_buffer(
                     FrameType::BGR0 => pixelformat::create_bgr_frame(sample).map(Frame::BGR0),
                     FrameType::BGRAFrame => pixelformat::create_bgra_frame(sample).map(Frame::BGRA),
                 };
+                if frame.is_none() {
+                    note(|t| &mut t.decode_failed);
+                }
+                return frame;
             }
+            SCFrameStatus::Blank => note(|t| &mut t.blank),
+            SCFrameStatus::Suspended => note(|t| &mut t.suspended),
             SCFrameStatus::Idle => {
+                note(|t| &mut t.idle);
                 // Quick hack - just send an empty frame, and the caller can figure out how to handle it
                 if let FrameType::BGRAFrame = output_type {
                     return Some(Frame::BGRA(BGRAFrame {
@@ -221,8 +291,10 @@ pub fn process_sample_buffer(
                     }));
                 }
             }
-            _ => {}
+            _ => note(|t| &mut t.other),
         }
+    } else {
+        note(|t| &mut t.not_screen);
     }
 
     None

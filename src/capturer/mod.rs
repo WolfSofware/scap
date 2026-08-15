@@ -205,7 +205,10 @@ impl Capturer {
                 return Err(NextFrameError::Stream(error));
             }
             if timeout.is_some_and(|limit| started.elapsed() >= limit) {
-                return Err(NextFrameError::Timeout { discarded });
+                return Err(NextFrameError::Timeout {
+                    discarded,
+                    why: self.engine.drop_summary(),
+                });
             }
         }
     }
@@ -256,6 +259,8 @@ pub enum NextFrameError {
     Timeout {
         /// Сколько буферов пришло, но кадром не стало.
         discarded: u64,
+        /// Почему именно они не стали кадрами (macOS).
+        why: Option<String>,
     },
 }
 
@@ -264,13 +269,14 @@ impl std::fmt::Display for NextFrameError {
         match self {
             NextFrameError::Stream(error) => write!(f, "поток захвата отказал: {error}"),
             NextFrameError::Disconnected => f.write_str("источник захвата закрылся"),
-            NextFrameError::Timeout { discarded: 0 } => {
+            NextFrameError::Timeout { discarded: 0, .. } => {
                 f.write_str("за отведённое время источник не прислал ничего и не сообщил об ошибке")
             }
-            NextFrameError::Timeout { discarded } => write!(
+            NextFrameError::Timeout { discarded, why } => write!(
                 f,
-                "источник прислал {discarded} буферов за отведённое время, \
-                 но кадром не стал ни один"
+                "источник прислал {discarded} буферов за отведённое время, но кадром не стал \
+                 ни один ({})",
+                why.as_deref().unwrap_or("причина неизвестна")
             ),
         }
     }
