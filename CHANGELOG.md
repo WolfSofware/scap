@@ -6,6 +6,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0](https://github.com/WolfSofware/scap/compare/v0.0.8...v0.1.0) - 2026-09-25
+
+### Added
+
+- `get_all_displays`, `get_all_windows` and `get_all_applications` list capture targets with ids and names on every platform; `Window` now reports its `process_id` and `app_name`.
+- `Subscription` captures one display, window or application by id and delivers frames to a callback without copying them: `IOSurface`-backed `CMSampleBuffer` on macOS, `ID3D11Texture2D` on Windows, DMA-BUF (or mapped shared memory) on Linux.
+- Optional audio for subscriptions: ScreenCaptureKit on macOS, WASAPI system or per-process loopback on Windows, PipeWire on Linux.
+- Linux: `get_installed_display_servers` and `get_current_display_protocol`.
+- Linux: displays and windows are listed through RandR/EWMH on X11 and `wl_output`/`ext-foreign-toplevel-list-v1` on Wayland.
+- Integration tests in `tests/capture.rs` (run with `--ignored`) and an `examples/subscribe.rs` example.
+
+### Changed
+
+- **Breaking:** `windows-capture` 2.0.1 and `windows` 0.62 on Windows; `pipewire` 0.10 and `dbus` 0.9.12 on Linux. The minimum Rust version is now 1.82 (required by `windows` 0.62).
+- **Breaking:** `Window` has new `process_id` and `app_name` fields; on Linux `Display` and `Window` gained a `raw_handle`.
+- The `targets` module is public.
+- `sysinfo` is only a dependency on macOS.
+- Windows: `Display` and `Window` are `Send + Sync`, so targets can be shared across threads (e.g. in Tauri state).
+- The license is the standard MIT text, matching upstream; the earlier copy had a non-standard grant condition.
+- Windows: display titles are the monitor's friendly name (falling back to the GDI device name), and untitled windows are no longer listed.
+- Linux: `get_all_targets` lists real displays and windows, and returns an error outside a graphical session instead of an empty list.
+
+### Fixed
+
+- Windows: uncropped frames no longer include the texture's row padding.
+- Linux: frames are sized by the PipeWire chunk instead of the whole buffer, and several capturers can run at once (the capture state is no longer global).
+
 ## [0.0.8](https://github.com/CapSoftware/scap/compare/v0.0.7...v0.0.8) - 2024-12-10
 
 ### Other

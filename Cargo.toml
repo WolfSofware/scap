@@ -1,7 +1,7 @@
 [package]
 name = "scap"
 description = "Modern, high-performance screen capture library for Rust. Cross-platform."
-version = "0.0.8"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT"
@@ -10,8 +10,7 @@ authors = [
 	"Pranav <pranav2000joglekar@gmail.com>",
 ]
 readme = "README.md"
-repository = "https://github.com/helmerapp/scap"
-documentation = "https://docs.rs/scap"
+repository = "https://github.com/WolfSofware/scap"
 keywords = ["screen", "recording", "video", "capture", "media"]
 categories = ["graphics", "multimedia", "multimedia::video"]
 
