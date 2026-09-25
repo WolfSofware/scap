@@ -17,7 +17,7 @@ use crate::{
 use super::ChannelItem;
 
 mod pixel_buffer;
-mod pixelformat;
+pub(crate) mod pixelformat;
 
 pub use pixel_buffer::PixelBuffer;
 

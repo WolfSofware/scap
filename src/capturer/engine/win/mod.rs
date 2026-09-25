@@ -59,7 +59,7 @@ impl GraphicsCaptureApiHandler for Capturer {
         frame: &mut WCFrame,
         _: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        let frame_timestamp = frame.timestamp().Duration;
+        let frame_timestamp = frame.timestamp()?.Duration;
         let first_frame_timestamp = *self.first_frame_timestamp.get_or_insert(frame_timestamp);
         let display_time = timestamp_from_timespan(
             self.start_unix_nanos,
@@ -75,19 +75,17 @@ impl GraphicsCaptureApiHandler for Capturer {
                 let end_y = (cropped_area.origin.y + cropped_area.size.height) as u32;
 
                 // crop the frame
-                let mut cropped_buffer = frame.buffer_crop(start_x, start_y, end_x, end_y)?;
+                let cropped_buffer = frame.buffer_crop(start_x, start_y, end_x, end_y)?;
 
-                // get raw frame buffer
-                let raw_frame_buffer = match cropped_buffer.as_nopadding_buffer() {
-                    Ok(buffer) => buffer,
-                    Err(_) => return Err(("Failed to get raw buffer").into()),
-                };
+                // copy the rows without their padding
+                let mut scratch = Vec::new();
+                let data = cropped_buffer.as_nopadding_buffer(&mut scratch).to_vec();
 
                 let bgr_frame = BGRAFrame {
                     display_time,
                     width: cropped_area.size.width as i32,
                     height: cropped_area.size.height as i32,
-                    data: raw_frame_buffer.to_vec(),
+                    data,
                 };
 
                 if self.tx.send(Frame::BGRA(bgr_frame)).is_err() {
@@ -95,14 +93,16 @@ impl GraphicsCaptureApiHandler for Capturer {
                 }
             }
             None => {
-                // get raw frame buffer
-                let mut frame_buffer = frame.buffer()?;
-                let raw_frame_buffer = frame_buffer.as_raw_buffer();
-                let frame_data = raw_frame_buffer.to_vec();
+                let (width, height) = (frame.width() as i32, frame.height() as i32);
+
+                // copy the rows without their padding
+                let frame_buffer = frame.buffer()?;
+                let mut scratch = Vec::new();
+                let frame_data = frame_buffer.as_nopadding_buffer(&mut scratch).to_vec();
                 let bgr_frame = BGRAFrame {
                     display_time,
-                    width: frame.width() as i32,
-                    height: frame.height() as i32,
+                    width,
+                    height,
                     data: frame_data,
                 };
 

@@ -1,54 +1,62 @@
-use super::{Display, Target, TargetError};
+use super::{Display, Target, TargetError, Window};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::{
     Foundation::{HWND, RECT},
     Graphics::Gdi::HMONITOR,
 };
-use windows_capture::{monitor::Monitor, window::Window};
+use windows_capture::{monitor::Monitor, window::Window as WCWindow};
 
-pub fn get_all_targets() -> Result<Vec<Target>, TargetError> {
-    let mut targets: Vec<Target> = Vec::new();
+pub fn get_all_displays() -> Result<Vec<Display>, TargetError> {
+    Monitor::enumerate()
+        .map_err(TargetError::new)?
+        .into_iter()
+        .map(display_from_monitor)
+        .collect()
+}
 
-    // Add displays to targets
-    let displays = Monitor::enumerate().map_err(TargetError::new)?;
-    for display in displays {
-        let id = display.as_raw_hmonitor() as u32;
-        let title = display.device_name().map_err(TargetError::new)?;
+pub fn get_all_windows() -> Result<Vec<Window>, TargetError> {
+    Ok(WCWindow::enumerate()
+        .map_err(TargetError::new)?
+        .into_iter()
+        .filter_map(|window| {
+            // Windows without a title are tool windows the user can't pick
+            let title = window.title().ok().filter(|title| !title.is_empty())?;
+            let process_id = window.process_id().ok();
+            // Fails for elevated processes; the window stays capturable
+            let app_name = window
+                .process_name()
+                .ok()
+                .map(|name| name.trim_end_matches(".exe").to_string());
 
-        let target = Target::Display(super::Display {
-            id,
-            title,
-            raw_handle: HMONITOR(display.as_raw_hmonitor()),
-        });
-        targets.push(target);
-    }
+            Some(Window {
+                id: window.as_raw_hwnd() as usize as u32,
+                title,
+                process_id,
+                app_name,
+                raw_handle: HWND(window.as_raw_hwnd()),
+            })
+        })
+        .collect())
+}
 
-    // Add windows to targets
-    let windows = Window::enumerate().map_err(TargetError::new)?;
-    for window in windows {
-        let id = window.as_raw_hwnd() as u32;
-        let title = window.title().map_err(TargetError::new)?.to_string();
+fn display_from_monitor(monitor: Monitor) -> Result<Display, TargetError> {
+    // `name` is the friendly monitor name; fall back to the GDI device name
+    let title = monitor
+        .name()
+        .ok()
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| monitor.device_name(), Ok)
+        .map_err(TargetError::new)?;
 
-        let target = Target::Window(super::Window {
-            id,
-            title,
-            raw_handle: HWND(window.as_raw_hwnd()),
-        });
-        targets.push(target);
-    }
-
-    Ok(targets)
+    Ok(Display {
+        id: monitor.as_raw_hmonitor() as usize as u32,
+        title,
+        raw_handle: HMONITOR(monitor.as_raw_hmonitor()),
+    })
 }
 
 pub fn get_main_display() -> Result<Display, TargetError> {
-    let display = Monitor::primary().map_err(TargetError::new)?;
-    let id = display.as_raw_hmonitor() as u32;
-
-    Ok(Display {
-        id,
-        title: display.device_name().map_err(TargetError::new)?,
-        raw_handle: HMONITOR(display.as_raw_hmonitor()),
-    })
+    display_from_monitor(Monitor::primary().map_err(TargetError::new)?)
 }
 
 // Referred to: https://github.com/tauri-apps/tao/blob/ab792dbd6c5f0a708c818b20eaff1d9a7534c7c1/src/platform_impl/windows/dpi.rs#L50

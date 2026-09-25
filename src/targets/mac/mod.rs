@@ -6,7 +6,7 @@ use core_graphics_helmer_fork::window::CGWindowID;
 use objc::{msg_send, sel, sel_impl};
 use screencapturekit::shareable_content::SCShareableContent;
 
-use super::{Display, Target, TargetError};
+use super::{Application, Display, Target, TargetError, Window};
 
 fn get_display_name(display_id: CGDirectDisplayID) -> String {
     unsafe {
@@ -35,42 +35,65 @@ fn get_display_name(display_id: CGDirectDisplayID) -> String {
     }
 }
 
-pub fn get_all_targets() -> Result<Vec<Target>, TargetError> {
-    let mut targets: Vec<Target> = Vec::new();
-
+pub fn get_all_displays() -> Result<Vec<Display>, TargetError> {
     let content = SCShareableContent::get().map_err(|error| TargetError::new(error.to_string()))?;
 
-    // Add displays to targets
-    for display in content.displays() {
-        let id: CGDirectDisplayID = display.display_id();
-        let raw_handle = CGDisplay::new(id);
-        let title = get_display_name(id);
+    Ok(content
+        .displays()
+        .into_iter()
+        .map(|display| {
+            let id: CGDirectDisplayID = display.display_id();
+            Display {
+                id,
+                title: get_display_name(id),
+                raw_handle: CGDisplay::new(id),
+            }
+        })
+        .collect())
+}
 
-        let target = Target::Display(super::Display {
-            id,
-            title,
-            raw_handle,
-        });
+pub fn get_all_windows() -> Result<Vec<Window>, TargetError> {
+    let content = SCShareableContent::get().map_err(|error| TargetError::new(error.to_string()))?;
 
-        targets.push(target);
-    }
-
-    // Add windows to targets
-    for window in content.windows() {
-        if let Some(title) = window.title() {
+    Ok(content
+        .windows()
+        .into_iter()
+        .filter_map(|window| {
+            let title = window.title()?;
             let id = window.window_id();
+            let application = window.owning_application();
             let raw_handle: CGWindowID = id;
 
-            let target = Target::Window(super::Window {
+            Some(Window {
                 id,
                 title,
+                process_id: application
+                    .as_ref()
+                    .and_then(|application| u32::try_from(application.process_id()).ok()),
+                app_name: application.map(|application| application.application_name()),
                 raw_handle,
-            });
-            targets.push(target);
-        }
-    }
+            })
+        })
+        .collect())
+}
 
-    Ok(targets)
+pub fn get_all_applications() -> Result<Vec<Application>, TargetError> {
+    let content = SCShareableContent::get().map_err(|error| TargetError::new(error.to_string()))?;
+
+    Ok(content
+        .applications()
+        .into_iter()
+        .filter_map(|application| {
+            let name = application.application_name();
+            if name.is_empty() {
+                return None;
+            }
+            Some(Application {
+                pid: u32::try_from(application.process_id()).ok()?,
+                name,
+            })
+        })
+        .collect())
 }
 
 pub fn get_main_display() -> Result<Display, TargetError> {

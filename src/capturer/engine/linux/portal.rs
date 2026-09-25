@@ -221,10 +221,22 @@ macro_rules! match_response {
     };
 }
 
+/// Kinds of sources the portal dialog offers, as a bit mask
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceType(u32);
+
+impl SourceType {
+    pub const MONITOR: Self = Self(1);
+    pub const WINDOW: Self = Self(2);
+    /// Everything the portal supports
+    pub const ANY: Self = Self(u32::MAX);
+}
+
 pub struct ScreenCastPortal<'a> {
     proxy: Proxy<'a, &'a Connection>,
     token: String,
     cursor_mode: u32,
+    source_types: SourceType,
 }
 
 impl<'a> ScreenCastPortal<'a> {
@@ -241,7 +253,13 @@ impl<'a> ScreenCastPortal<'a> {
             proxy,
             token,
             cursor_mode: 1,
+            source_types: SourceType::ANY,
         }
+    }
+
+    pub fn source_types(mut self, source_types: SourceType) -> Self {
+        self.source_types = source_types;
+        self
     }
 
     fn create_session_args(&self) -> arg::PropMap {
@@ -263,10 +281,13 @@ impl<'a> ScreenCastPortal<'a> {
             String::from("handle_token"),
             Variant(Box::new(self.token.clone())),
         );
-        map.insert(
-            String::from("types"),
-            Variant(Box::new(self.proxy.available_source_types()?)),
-        );
+        let available = self.proxy.available_source_types()?;
+        let types = match available & self.source_types.0 {
+            // Older portals don't report window support; let them decide
+            0 => available,
+            types => types,
+        };
+        map.insert(String::from("types"), Variant(Box::new(types)));
         map.insert(String::from("multiple"), Variant(Box::new(false)));
         map.insert(
             String::from("cursor_mode"),

@@ -5,7 +5,13 @@ mod mac;
 mod win;
 
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
+
+// The session file parser is platform independent, so its tests run everywhere
+#[cfg(all(test, not(target_os = "linux")))]
+#[path = "linux/display_server.rs"]
+#[allow(dead_code)]
+mod display_server_tests;
 
 /// Checks if process has permission to capture the screen
 pub fn has_permission() -> bool {

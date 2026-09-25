@@ -1,3 +1,5 @@
+pub mod display_server;
+
 // TODO
 pub fn is_supported() -> bool {
     true
