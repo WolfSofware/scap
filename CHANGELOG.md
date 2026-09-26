@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows: `Options::fps` limits the frame rate (it was ignored).
+- Windows: `RGB`, `BGR0` and `YUVFrame` outputs return those frame types; they used to arrive as `BGRA` frames holding RGBA bytes. `YUVFrame` is converted to BT.709 NV12.
+- Windows: a crop area that no longer fits the window (after a resize) is clamped instead of ending the capture, and frames are cropped only when `crop_area` is set.
+- Windows and Linux: `get_next_frame` returns an error when the captured window closes or the stream ends, instead of blocking forever.
+- Linux: `Capturer` honours `output_type` and `crop_area`, and `fps: 0` (the default) no longer breaks format negotiation.
+
+### Changed
+
+- Windows and Linux: `Capturer` frames are copied once, straight from the mapped capture buffer into the output frame.
+- **Breaking (Linux):** `Capturer` returns the requested `output_type` instead of PipeWire's native `BGRx`/`RGBx`/`XBGR` frames.
+
 ## [0.1.0](https://github.com/WolfSofware/scap/compare/v0.0.8...v0.1.0) - 2026-09-25
 
 ### Added

@@ -1,11 +1,14 @@
 use crate::{
     capturer::{Area, Options, Point, Size},
-    frame::{BGRAFrame, Frame, FrameType},
+    frame::{
+        convert::{to_frame, PackedImage},
+        Frame, FrameType, PixelFormat,
+    },
     targets::{self, Target, TargetError},
 };
 use std::cmp;
-use std::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows_capture::capture::Context;
 use windows_capture::{
     capture::{CaptureControl, GraphicsCaptureApiHandler},
@@ -19,10 +22,17 @@ use windows_capture::{
     window::Window as WCWindow,
 };
 
-#[derive(Debug)]
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The only sender of the capturer's channel. Taking it out when the capture
+/// ends disconnects the channel, so `get_next_frame` returns instead of
+/// waiting forever for a window that was closed.
+type SharedSender = Arc<Mutex<Option<mpsc::Sender<Frame>>>>;
+
 struct Capturer {
-    pub tx: mpsc::Sender<Frame>,
-    pub crop: Option<Area>,
+    tx: SharedSender,
+    crop: Option<Area>,
+    output_type: FrameType,
     first_frame_timestamp: Option<i64>,
     start_unix_nanos: u64,
 }
@@ -35,17 +45,18 @@ enum Settings {
 
 pub struct WCStream {
     settings: Settings,
-    capture_control: Option<CaptureControl<Capturer, Box<dyn std::error::Error + Send + Sync>>>,
+    capture_control: Option<CaptureControl<Capturer, BoxError>>,
 }
 
 impl GraphicsCaptureApiHandler for Capturer {
     type Flags = FlagStruct;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Error = BoxError;
 
     fn new(context: Context<Self::Flags>) -> Result<Self, Self::Error> {
         Ok(Self {
             tx: context.flags.tx,
             crop: context.flags.crop,
+            output_type: context.flags.output_type,
             first_frame_timestamp: None,
             start_unix_nanos: u64::try_from(
                 SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
@@ -57,8 +68,32 @@ impl GraphicsCaptureApiHandler for Capturer {
     fn on_frame_arrived(
         &mut self,
         frame: &mut WCFrame,
-        _: InternalCaptureControl,
+        capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        match self.deliver(frame) {
+            Ok(true) => Ok(()),
+            // Nobody is receiving anymore; stop capturing
+            Ok(false) => {
+                capture_control.stop();
+                Ok(())
+            }
+            Err(error) => {
+                self.disconnect();
+                Err(error)
+            }
+        }
+    }
+
+    fn on_closed(&mut self) -> Result<(), Self::Error> {
+        // The captured window or monitor went away
+        self.disconnect();
+        Ok(())
+    }
+}
+
+impl Capturer {
+    /// Converts and sends one frame; `Ok(false)` once the receiver is gone
+    fn deliver(&mut self, frame: &mut WCFrame) -> Result<bool, BoxError> {
         let frame_timestamp = frame.timestamp()?.Duration;
         let first_frame_timestamp = *self.first_frame_timestamp.get_or_insert(frame_timestamp);
         let display_time = timestamp_from_timespan(
@@ -66,58 +101,58 @@ impl GraphicsCaptureApiHandler for Capturer {
             first_frame_timestamp,
             frame_timestamp,
         );
-        match &self.crop {
-            Some(cropped_area) => {
-                // get the cropped area
-                let start_x = cropped_area.origin.x as u32;
-                let start_y = cropped_area.origin.y as u32;
-                let end_x = (cropped_area.origin.x + cropped_area.size.width) as u32;
-                let end_y = (cropped_area.origin.y + cropped_area.size.height) as u32;
 
-                // crop the frame
-                let cropped_buffer = frame.buffer_crop(start_x, start_y, end_x, end_y)?;
-
-                // copy the rows without their padding
-                let mut scratch = Vec::new();
-                let data = cropped_buffer.as_nopadding_buffer(&mut scratch).to_vec();
-
-                let bgr_frame = BGRAFrame {
-                    display_time,
-                    width: cropped_area.size.width as i32,
-                    height: cropped_area.size.height as i32,
-                    data,
-                };
-
-                if self.tx.send(Frame::BGRA(bgr_frame)).is_err() {
-                    return Ok(());
+        // Crop on the GPU so only the requested region is read back
+        let mut buffer = match &self.crop {
+            Some(area) => match crop_bounds(area, frame.width(), frame.height()) {
+                Some([start_x, start_y, end_x, end_y]) => {
+                    frame.buffer_crop(start_x, start_y, end_x, end_y)?
                 }
-            }
-            None => {
-                let (width, height) = (frame.width() as i32, frame.height() as i32);
+                // The window shrank past the crop area; wait for it to grow
+                None => return Ok(true),
+            },
+            None => frame.buffer()?,
+        };
 
-                // copy the rows without their padding
-                let frame_buffer = frame.buffer()?;
-                let mut scratch = Vec::new();
-                let frame_data = frame_buffer.as_nopadding_buffer(&mut scratch).to_vec();
-                let bgr_frame = BGRAFrame {
-                    display_time,
-                    width,
-                    height,
-                    data: frame_data,
-                };
+        let (width, height, stride) = (
+            buffer.width() as usize,
+            buffer.height() as usize,
+            buffer.row_pitch() as usize,
+        );
+        // Read the mapped texture in place: one copy into the output frame
+        let image = PackedImage {
+            data: buffer.as_raw_buffer(),
+            stride,
+            width,
+            height,
+            format: PixelFormat::Bgra,
+        };
+        let Some(output) = to_frame(image, self.output_type, display_time) else {
+            return Ok(true);
+        };
 
-                if self.tx.send(Frame::BGRA(bgr_frame)).is_err() {
-                    return Ok(());
-                }
-            }
+        let sender = self.tx.lock().map_err(|_| "Frame channel lock poisoned")?;
+        Ok(sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(output).is_ok()))
+    }
+
+    fn disconnect(&self) {
+        if let Ok(mut sender) = self.tx.lock() {
+            sender.take();
         }
-        Ok(())
     }
+}
 
-    fn on_closed(&mut self) -> Result<(), Self::Error> {
-        println!("Closed");
-        Ok(())
-    }
+/// Crop area clamped to the frame as `[start_x, start_y, end_x, end_y]`
+/// with exclusive ends; `None` when nothing of it is inside the frame
+fn crop_bounds(area: &Area, frame_width: u32, frame_height: u32) -> Option<[u32; 4]> {
+    let clamp = |value: f64, max: u32| value.max(0.0).min(f64::from(max)) as u32;
+    let start_x = clamp(area.origin.x, frame_width);
+    let start_y = clamp(area.origin.y, frame_height);
+    let end_x = clamp(area.origin.x + area.size.width, frame_width);
+    let end_y = clamp(area.origin.y + area.size.height, frame_height);
+    (start_x < end_x && start_y < end_y).then_some([start_x, start_y, end_x, end_y])
 }
 
 fn timestamp_from_timespan(start_ns: u64, first: i64, current: i64) -> u64 {
@@ -144,10 +179,11 @@ impl WCStream {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct FlagStruct {
-    pub tx: mpsc::Sender<Frame>,
-    pub crop: Option<Area>,
+    tx: SharedSender,
+    crop: Option<Area>,
+    output_type: FrameType,
 }
 
 pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> Result<WCStream, String> {
@@ -157,52 +193,65 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> Result<WCS
         .map_or_else(|| targets::get_main_display().map(Target::Display), Ok)
         .map_err(|error| error.to_string())?;
 
-    let color_format = match options.output_type {
-        FrameType::BGRAFrame => ColorFormat::Bgra8,
-        _ => ColorFormat::Rgba8,
-    };
+    let supported = |check: fn() -> Result<bool, _>| check().unwrap_or(false);
 
-    let show_cursor = match options.show_cursor {
-        true => CursorCaptureSettings::WithCursor,
-        false => CursorCaptureSettings::WithoutCursor,
-    };
-
-    let draw_border = if GraphicsCaptureApi::is_border_settings_supported().unwrap_or(false) {
-        if options.show_highlight {
-            DrawBorderSettings::WithBorder
-        } else {
-            DrawBorderSettings::WithoutBorder
-        }
+    let show_cursor = if !supported(GraphicsCaptureApi::is_cursor_settings_supported) {
+        CursorCaptureSettings::Default
+    } else if options.show_cursor {
+        CursorCaptureSettings::WithCursor
     } else {
-        DrawBorderSettings::Default
+        CursorCaptureSettings::WithoutCursor
     };
 
+    let draw_border = if !supported(GraphicsCaptureApi::is_border_settings_supported) {
+        DrawBorderSettings::Default
+    } else if options.show_highlight {
+        DrawBorderSettings::WithBorder
+    } else {
+        DrawBorderSettings::WithoutBorder
+    };
+
+    // Windows otherwise delivers a frame for every screen update
+    let update_interval = if options.fps > 0
+        && supported(GraphicsCaptureApi::is_minimum_update_interval_supported)
+    {
+        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / f64::from(options.fps)))
+    } else {
+        MinimumUpdateIntervalSettings::Default
+    };
+
+    // Only crop when asked to; a full frame needs no GPU copy region
+    let crop = match options.crop_area {
+        Some(_) => Some(get_crop_area(options).map_err(|error| error.to_string())?),
+        None => None,
+    };
+    let flags = FlagStruct {
+        tx: Arc::new(Mutex::new(Some(tx))),
+        crop,
+        output_type: options.output_type,
+    };
+
+    // Every output type is converted from BGRA on the CPU
     let settings = match target {
         Target::Display(display) => Settings::Display(WCSettings::new(
             WCMonitor::from_raw_hmonitor(display.raw_handle.0),
             show_cursor,
             draw_border,
             SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
+            update_interval,
             DirtyRegionSettings::Default,
-            color_format,
-            FlagStruct {
-                tx,
-                crop: Some(get_crop_area(options).map_err(|error| error.to_string())?),
-            },
+            ColorFormat::Bgra8,
+            flags,
         )),
         Target::Window(window) => Settings::Window(WCSettings::new(
             WCWindow::from_raw_hwnd(window.raw_handle.0),
             show_cursor,
             draw_border,
             SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
+            update_interval,
             DirtyRegionSettings::Default,
-            color_format,
-            FlagStruct {
-                tx,
-                crop: Some(get_crop_area(options).map_err(|error| error.to_string())?),
-            },
+            ColorFormat::Bgra8,
+            flags,
         )),
     };
 
@@ -272,11 +321,23 @@ pub fn get_crop_area(options: &Options) -> Result<Area, TargetError> {
 
 #[cfg(test)]
 mod tests {
-    use super::timestamp_from_timespan;
+    use super::*;
 
     #[test]
     fn frame_timestamp_is_monotonic() {
         assert_eq!(timestamp_from_timespan(1_000, 10, 60), 6_000);
         assert_eq!(timestamp_from_timespan(1_000, 10, 5), 1_000);
+    }
+
+    #[test]
+    fn crop_bounds_are_clamped_to_the_frame() {
+        let area = |x, y, width, height| Area {
+            origin: Point { x, y },
+            size: Size { width, height },
+        };
+        assert_eq!(crop_bounds(&area(10.0, 20.0, 100.0, 50.0), 1920, 1080), Some([10, 20, 110, 70]));
+        assert_eq!(crop_bounds(&area(1900.0, 0.0, 100.0, 50.0), 1920, 1080), Some([1900, 0, 1920, 50]));
+        assert_eq!(crop_bounds(&area(-5.0, -5.0, 10.0, 10.0), 1920, 1080), Some([0, 0, 5, 5]));
+        assert_eq!(crop_bounds(&area(2000.0, 0.0, 100.0, 50.0), 1920, 1080), None);
     }
 }

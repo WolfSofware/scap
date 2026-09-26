@@ -1,3 +1,6 @@
+// The macOS engine gets its frames converted by ScreenCaptureKit
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) mod convert;
 mod native;
 
 pub use native::*;

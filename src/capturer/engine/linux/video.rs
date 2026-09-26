@@ -169,11 +169,15 @@ fn run(
 
     let _listener = stream
         .add_local_listener_with_user_data(data)
-        .state_changed(|_, data, _, new| {
-            if let StreamState::Error(error) = new {
+        .state_changed(|_, data, _, new| match new {
+            StreamState::Error(error) => {
                 *data.error.borrow_mut() = Some(format!("PipeWire stream error: {error}"));
                 data.mainloop.quit();
             }
+            // The node went away (e.g. the portal session or the shared
+            // window closed); finish instead of idling forever
+            StreamState::Unconnected => data.mainloop.quit(),
+            _ => {}
         })
         .param_changed(param_changed)
         .process(process)
