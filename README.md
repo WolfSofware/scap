@@ -29,7 +29,7 @@ A Rust library for high-quality screen capture that leverages native OS APIs for
 
 ```toml
 [dependencies]
-scap = { git = "https://github.com/WolfSofware/scap", tag = "v0.1.0" }
+scap = { git = "https://github.com/WolfSofware/scap", tag = "v0.2.0" }
 ```
 
 Build requirements:
