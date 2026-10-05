@@ -5,7 +5,7 @@ use crate::{
 };
 use std::cmp;
 use std::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use windows_capture::capture::Context;
 use windows_capture::{
     capture::{CaptureControl, GraphicsCaptureApiHandler},
@@ -198,13 +198,25 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> Result<WCS
         DrawBorderSettings::Default
     };
 
+    // Частота из Options. Без неё Windows Graphics Capture отдаёт кадры с
+    // частотой монитора (240 Гц и выше), и каждый копируется из видеопамяти
+    // впустую. MinUpdateInterval есть не на всех Windows (появился в 11):
+    // там, где его нет, просить нельзя — захват вообще не запустится.
+    let min_interval = if options.fps > 0
+        && GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false)
+    {
+        MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / options.fps as f64))
+    } else {
+        MinimumUpdateIntervalSettings::Default
+    };
+
     let settings = match target {
         Target::Display(display) => Settings::Display(WCSettings::new(
             WCMonitor::from_raw_hmonitor(display.raw_handle.0),
             show_cursor,
             draw_border,
             SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
+            min_interval,
             DirtyRegionSettings::Default,
             color_format,
             FlagStruct {
@@ -217,7 +229,7 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<Frame>) -> Result<WCS
             show_cursor,
             draw_border,
             SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
+            min_interval,
             DirtyRegionSettings::Default,
             color_format,
             FlagStruct {
