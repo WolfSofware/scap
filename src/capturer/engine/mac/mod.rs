@@ -105,6 +105,7 @@ pub fn create_capturer(
         .with_shows_cursor(options.show_cursor)
         .with_minimum_frame_interval(&CMTime::new(1, options.fps as i32));
 
+    let filter = filter.map_err(|error| error.to_string())?;
     let delegate_flag = error_flag.clone();
     let mut stream = SCStream::new_with_delegate(
         &filter,
@@ -113,8 +114,11 @@ pub fn create_capturer(
             eprintln!("Screen capture error: {error}");
             delegate_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }),
-    );
-    stream.add_output_handler(Capturer::new(tx), SCStreamOutputType::Screen);
+    )
+    .map_err(|error| error.to_string())?;
+    stream
+        .add_output_handler(Capturer::new(tx), SCStreamOutputType::Screen)
+        .map_err(|error| error.to_string())?;
 
     Ok(stream)
 }

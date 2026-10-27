@@ -46,7 +46,7 @@ fn is_zero_copy(native: &NativeFrame<'_>) -> bool {
         NativeFrame::CoreVideo(sample) => {
             use screencapturekit::prelude::CMSampleBufferExt;
             sample
-                .image_buffer()
+                .pixel_buffer()
                 .is_some_and(|buffer| buffer.is_backed_by_io_surface())
         }
         #[cfg(target_os = "windows")]

@@ -196,6 +196,8 @@ impl std::fmt::Display for CapturerError {
 impl Error for CapturerError {}
 
 pub struct RawCapturer<'a> {
+    // Читается только движком macOS.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     capturer: &'a Capturer,
 }
 

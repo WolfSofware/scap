@@ -120,6 +120,7 @@ pub fn start(config: Config) -> Result<Subscription, SubscriptionError> {
         .with_channel_count(AUDIO_CHANNELS);
 
     let error = Arc::new(Mutex::new(None));
+    let filter = filter.map_err(SubscriptionError::platform)?;
     let delegate_error = Arc::clone(&error);
     let mut stream = SCStream::new_with_delegate(
         &filter,
@@ -129,7 +130,8 @@ pub fn start(config: Config) -> Result<Subscription, SubscriptionError> {
                 *slot = Some(error.to_string());
             }
         }),
-    );
+    )
+    .map_err(SubscriptionError::platform)?;
 
     if let Some(callback) = config.video {
         let callback = Mutex::new(callback);
@@ -145,7 +147,7 @@ pub fn start(config: Config) -> Result<Subscription, SubscriptionError> {
                 },
                 SCStreamOutputType::Screen,
             )
-            .ok_or_else(|| SubscriptionError::Platform("Failed to add video output".into()))?;
+            .map_err(SubscriptionError::platform)?;
     }
 
     if let Some(callback) = config.audio {
@@ -160,7 +162,7 @@ pub fn start(config: Config) -> Result<Subscription, SubscriptionError> {
                 },
                 SCStreamOutputType::Audio,
             )
-            .ok_or_else(|| SubscriptionError::Platform("Failed to add audio output".into()))?;
+            .map_err(SubscriptionError::platform)?;
     }
 
     stream.start_capture().map_err(SubscriptionError::platform)?;
@@ -176,7 +178,7 @@ fn video_frame(sample: &CMSampleBuffer) -> Option<VideoFrame<'_>> {
         return None;
     }
     // Retains the IOSurface-backed pixel buffer; no pixels are touched
-    let pixel_buffer = sample.image_buffer()?;
+    let pixel_buffer = sample.pixel_buffer()?;
     Some(VideoFrame {
         display_time: get_pts_in_nanoseconds(sample),
         width: pixel_buffer.width() as u32,
@@ -190,7 +192,7 @@ fn with_audio_frame(sample: &CMSampleBuffer, callback: impl FnOnce(&AudioFrame<'
     let Some(description) = sample.format_description() else {
         return;
     };
-    let Some(buffers) = sample.audio_buffer_list() else {
+    let Ok(buffers) = sample.audio_buffer_list() else {
         return;
     };
 

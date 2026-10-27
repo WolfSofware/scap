@@ -36,19 +36,20 @@ impl PixelBuffer {
     pub fn data(&self) -> PixelBufferData {
         let data = self
             .buffer
-            .image_buffer()
+            .pixel_buffer()
             .and_then(|buffer| {
                 buffer
                     .lock_read_only()
                     .ok()
-                    .map(|guard| guard.as_slice().to_vec())
+                    // SAFETY: кадр ScreenCaptureKit заперт только на чтение, пока жив guard, и сразу копируется в Vec; SCK не пишет в отданную поверхность, пока на неё держится CMSampleBuffer.
+                    .and_then(|guard| unsafe { guard.as_slice() }.map(<[u8]>::to_vec))
             })
             .unwrap_or_default();
         PixelBufferData(data)
     }
 
     pub fn planes(&self) -> Vec<Plane> {
-        let Some(buffer) = self.buffer.image_buffer() else {
+        let Some(buffer) = self.buffer.pixel_buffer() else {
             return Vec::new();
         };
         let Ok(guard) = buffer.lock_read_only() else {
@@ -60,7 +61,8 @@ impl PixelBuffer {
                     width: guard.width_of_plane(index),
                     height: guard.height_of_plane(index),
                     bytes_per_row: guard.bytes_per_row_of_plane(index),
-                    data: guard.plane_data(index)?.to_vec(),
+                    // SAFETY: см. `data()` — guard только на чтение, данные сразу копируются.
+                    data: unsafe { guard.plane_data(index) }?.to_vec(),
                 })
             })
             .collect()
@@ -73,7 +75,7 @@ impl PixelBuffer {
         ) {
             return None;
         }
-        let image = item.0.image_buffer()?;
+        let image = item.0.pixel_buffer()?;
         Some(Self {
             display_time: super::pixelformat::get_pts_in_nanoseconds(&item.0),
             width: image.width(),
